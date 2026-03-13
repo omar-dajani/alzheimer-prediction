@@ -93,25 +93,39 @@ def plot_specific_patients(df, variable_name, patient_list):
     if filtered_df.empty:
         print("None of the provided patient IDs were found in the dataset.")
         return
-        
-    # 4. Set up and create the plot
+    
+    # 4. Build a color map: one color per unique DIAGNOSIS
+    unique_diagnoses = filtered_df['DIAGNOSIS'].unique()
+    palette = sns.color_palette('tab10', n_colors=len(unique_diagnoses))
+    diagnosis_color_map = dict(zip(unique_diagnoses, palette))
+    
+    # 5. Set up and create the plot
     plt.figure(figsize=(10, 6))
     
-    sns.lineplot(
-        data=filtered_df, 
-        x='EXAMDATE', 
-        y=variable_name, 
-        hue='PTID',     # Assigns a unique color/line to each patient
-        marker='o',     # Adds dots at actual exam dates
-        linewidth=2,
-        legend=False,
-    )
+    # Draw one line per PTID, colored by their DIAGNOSIS
+    for ptid, patient_data in filtered_df.groupby('PTID'):
+        # Use the DIAGNOSIS of the first row for this patient to pick the color
+        diagnosis = patient_data['DIAGNOSIS'].iloc[0]
+        color = diagnosis_color_map[diagnosis]
+        
+        plt.plot(
+            patient_data['EXAMDATE'],
+            patient_data[variable_name],
+            color=color,
+            marker='o',
+            linewidth=2,
+            label=diagnosis  # Will be deduplicated in legend below
+        )
     
-    # 5. Formatting
+    # 6. Build a clean legend with one entry per DIAGNOSIS (no duplicates)
+    handles, labels = plt.gca().get_legend_handles_labels()
+    unique_legend = dict(zip(labels, handles))  # dict keys are unique, deduplicates by diagnosis label
+    plt.legend(unique_legend.values(), unique_legend.keys(), title='Diagnosis')
+    
+    # 7. Formatting
     plt.title(f'Longitudinal Progression of {variable_name} for Selected Patients')
     plt.xlabel('Exam Date')
     plt.ylabel(variable_name)
-    
     
     plt.tight_layout()
     plt.show()
