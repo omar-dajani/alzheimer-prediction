@@ -245,9 +245,8 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
     return study.best_value, final, scaler
 
 
-def calc_deepsurv_c(model, X, y_event, y_duration):
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X.values).astype(np.float32)
+def calc_deepsurv_c(model, scaler, X, y_event, y_duration):
+    X_scaled = scaler.transform(X.values).astype(np.float32)
     surv = model.predict_surv_df(X_scaled)
     ev = EvalSurv(surv,
                   y_duration.astype(np.float64),
