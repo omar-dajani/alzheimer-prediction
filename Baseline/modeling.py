@@ -240,7 +240,9 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
         batch_norm=True, dropout=best['dropout'])
     final = PycoxCoxPH(net, tt.optim.Adam(best['lr']))
     y_all = (y_duration.astype(np.float32), y_event.astype(np.float32))
-    final.fit(X_scaled, y_all, best['batch'], 100, verbose=False)
+    final.fit(X_scaled, y_all, best['batch'], 200, verbose=False,
+              val_size=0.2,
+              callbacks=[tt.callbacks.EarlyStopping(patience=15)])
     final.compute_baseline_hazards()
     return study.best_value, final, scaler
 
