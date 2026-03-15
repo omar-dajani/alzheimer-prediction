@@ -56,8 +56,6 @@ The following tables were used in this pipeline and exported as CSV files:<br>
 `subjects.csv` – participant demographic and subject-level information<br>
 `UCSFFSX7.csv` – structural MRI measurements derived from FreeSurfer segmentation
 
-> Describe here: which ADNI tables were downloaded, how the merge was performed, what the final merged file is named, and where to place it in the directory before running the notebook.
-
 To apply for ADNI data access, visit: [adni.loni.usc.edu](https://adni.loni.usc.edu)
 
 Once access is granted and the data is prepared, place the merged CSV file at:
