@@ -1,49 +1,15 @@
-# Alzheimer's Disease Progression — Multistate Survival Analysis
-**Rice D2K Capstone · Spring 2026**  
-**Professor:** Xinjie Lan
-**Sponsor:** Cindy Zhang
-**Mentor:** Antonio Mendoza Gonazales
-**Team:**  Nathon Chavez, Omar Dajani, Eliza Iqbol, Savannah Nix, Fabrizio Pacheco, Evie Roth, & Shichen Tang 
+# Alzheimer's Disease Progression Prediction
+### Rice University D2K Capstone — Spring 2026
+
+A multistate survival analysis pipeline for predicting Alzheimer's disease progression using longitudinal data from the Alzheimer's Disease Neuroimaging Initiative (ADNI). The pipeline covers data harmonization, tiered imputation, feature engineering, and baseline survival models (LightGBM and DeepSurv), with an ensemble layer combining model outputs.
 
 ---
 
-## Overview
+## Team
 
-This project builds a multimodal survival analysis pipeline to predict Alzheimer's disease progression using longitudinal data from the Alzheimer's Disease Neuroimaging Initiative (ADNI). Two cohorts are modeled:
+**Students:** Nathon Chavez, Omar Dajani, Eliza Iqbol, Savannah Nix, Fabrizio Pacheco, Evie Roth, Schichen Tang
 
-- **MCI → Dementia** (primary): 958 subjects, median follow-up ~2.7 years
-- **CN → Any Decline** (secondary): 824 subjects, median follow-up ~3.3 years, max ~17 years
-
-The pipeline implements and compares six model families — Cox PH, Random Survival Forest, LightGBM, XGBoost AFT, DeepSurv, and DeepHit — plus a multistate Aalen-Johansen model for disease state-occupation probabilities across the full CN → MCI → Dementia trajectory.
-
----
-
-## Results Summary
-
-### MCI → Dementia (C-index, 5-fold CV)
-
-| Model | C-index |
-|-------|---------|
-| XGBoost AFT | **0.908** |
-| LightGBM Survival | 0.907 |
-| Domain Ensemble (OOF) | 0.902 |
-| Random Survival Forest | 0.879 |
-| DeepSurv | 0.873 |
-| Cox PH | 0.839 ± 0.015 |
-| DeepHit | 0.838 |
-| Multistate Cox | 0.826 |
-
-### CN → Decline (C-index, 5-fold CV)
-
-| Model | C-index |
-|-------|---------|
-| XGBoost AFT | **0.884** |
-| Random Survival Forest | 0.846 |
-| LightGBM Survival | 0.835 |
-| DeepSurv | 0.817 |
-| DeepHit | 0.767 |
-| Multistate Cox (CN→MCI) | 0.768 |
-| Cox PH | 0.753 ± 0.056 |
+**Sponsor:** Antonio Mendoza Gonzales
 
 ---
 
@@ -51,123 +17,216 @@ The pipeline implements and compares six model families — Cox PH, Random Survi
 
 ```
 alzheimer-prediction/
-├── ADNI_Survival_Pipeline.ipynb   # Main pipeline (Colab notebook)
-├── EDA/
-│   └── eda_feature_deepdive.py    # Exploratory data analysis
-├── LightGBM/
-│   └── __init__.py
-├── Transformer/
-│   └── __init__.py                # Placeholder for future LSTM/Transformer work
-├── requirements.txt
+├── Baseline/
+│   ├── ADNI_Survival_Pipeline.ipynb   # Main pipeline notebook
+│   ├── modeling.py                    # Model training functions (LightGBM, DeepSurv, ensemble)
+│   ├── preprocessing.py               # Data harmonization, imputation, feature engineering
+│   ├── postprocessing.py              # Calibration plots, KM curves, subject-time matrix
+│   ├── fix_notebook_error.py          # Strips Optuna widget metadata for GitHub rendering
+│   ├── checkpoints/                   # Saved model checkpoints (.pkl)
+│   ├── figures/                       # Generated plots and visualizations
+│   ├── outputs/                       # Model output tables
+│   └── tables/                        # Preprocessed data tables
+├── EDA/                               # Exploratory data analysis notebooks and figures
+├── Transformer/                       # Transformer-based model on MRI imaging
 ├── .gitignore
 └── README.md
 ```
 
 ---
 
-## Data
+## Data Access
 
-This project uses the **ADNI Merged Dataset (ADNIMERGE)**, accessed via the Alzheimer's Disease Neuroimaging Initiative data portal at [adni.loni.usc.edu](https://adni.loni.usc.edu).
+> **⚠️ The ADNI data files are not included in this repository due to the ADNI Data Use Agreement. You must apply for access independently.**
 
-> **The data file is not included in this repository.** Access requires registration and approval through the ADNI data use agreement. Redistribution is prohibited under ADNI terms.
+This pipeline uses a merged dataset combining ADNIMERGE and ADNI4 data.
 
-To reproduce results, download `ADNIMERGE.csv` from the ADNI portal and place it at:
+**[PLACEHOLDER — to be completed by data pipeline lead]**
+
+> Describe here: which ADNI tables were downloaded, how the merge was performed, what the final merged file is named, and where to place it in the directory before running the notebook.
+
+To apply for ADNI data access, visit: [adni.loni.usc.edu](https://adni.loni.usc.edu)
+
+Once access is granted and the data is prepared, place the merged CSV file at:
 ```
-/content/drive/MyDrive/ADNI_capstone/ADNIMERGE_28Feb2026.csv
+Baseline/tables/ADNIMERGE_28Feb2026.csv
 ```
+
+---
+
+## Installation
+
+This pipeline runs in **Google Colab** with a GPU runtime. No local installation is required beyond cloning the repository.
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/omar-dajani/alzheimer-prediction.git
+cd alzheimer-prediction/Baseline
+```
+
+### 2. Upload to Google Colab
+
+Upload the `Baseline/` folder to your Google Drive, then open `ADNI_Survival_Pipeline.ipynb` in Colab.
+
+### 3. Install dependencies
+
+The first cell of the notebook installs all required packages. You can also install them manually:
+
+```bash
+pip install lifelines scikit-survival pycox lightgbm xgboost optuna shap \
+            fancyimpute neuroCombat torchtuples torch numpy pandas \
+            matplotlib seaborn scipy scikit-learn tqdm
+```
+
+### Key dependencies
+
+| Package | Purpose |
+|---|---|
+| `pycox` + `torchtuples` | DeepSurv neural survival model |
+| `lightgbm` | Gradient boosting survival model |
+| `lifelines` | Cox PH, Kaplan-Meier, C-index |
+| `neuroCombat` | MRI batch effect correction |
+| `optuna` | Hyperparameter tuning |
+| `shap` | Feature importance |
+| `scikit-survival` | Survival analysis utilities |
+
+> **GPU runtime required** for LightGBM (`device='gpu'`) and DeepSurv (PyTorch). In Colab: Runtime → Change runtime type → T4 GPU.
+
+---
+
+## Usage
+
+### Running the full pipeline
+
+Open `ADNI_Survival_Pipeline.ipynb` in Google Colab and run cells sequentially. The notebook is organized into clearly labeled sections:
+
+| Cell | Description |
+|---|---|
+| 1 | Install dependencies |
+| 2 | Imports and global config |
+| 3 | Data loading and DX harmonization |
+| 4 | Reversion removal |
+| 5 | Survival label construction |
+| 6 | Batch effect / ComBat harmonization |
+| 7 | Longitudinal slope computation |
+| 8 | Tiered imputation (longitudinal fill → MICE → CSF) |
+| 9 | Feature engineering |
+| 10 | Cohort assembly and final imputation |
+| 11 | Domain-separated feature sets |
+| 12 | Evaluation framework setup |
+| 13 | Two-stage CSF imputation |
+| 16 | LightGBM survival model |
+| 17 | DeepSurv neural Cox model |
+| 20 | Ensemble strategies |
+| 21–23 | Calibration, KM curves, model comparison table |
+| 24 | Subject × time matrix for future transformer use |
+
+### Retraining vs. loading from checkpoint
+
+Set the `RETRAIN` flag at the top of the notebook:
+
+```python
+RETRAIN = True   # Train all models from scratch
+RETRAIN = False  # Load from saved checkpoints in Baseline/checkpoints/
+```
+
+Checkpoints are saved automatically after each model trains. When `RETRAIN = False`, models are loaded from `.pkl` files in the `checkpoints/` directory.
+
+---
+
+## Notebook GitHub Rendering Fix
+
+The notebook may fail to render on GitHub due to Optuna widget metadata left in the notebook file. To fix this before pushing, run `fix_notebook_error.py` from the `Baseline/` directory:
+
+```python
+# fix_notebook_error.py — run once before committing
+import json, pathlib
+
+nb_path = "ADNI_Survival_Pipeline.ipynb"
+nb = json.loads(pathlib.Path(nb_path).read_text())
+nb["metadata"].pop("widgets", None)
+pathlib.Path(nb_path).write_text(json.dumps(nb, indent=1))
+```
+
+This strips the widget metadata and rewrites the file cleanly. Then commit the cleaned notebook.
 
 ---
 
 ## Pipeline Overview
 
-### Preprocessing
-- DX harmonization: SMC→CN, EMCI/LMCI→MCI, AD→Dementia
-- MCI→CN reversion removal (sponsor-specified)
-- ComBat harmonization audit for MRI scanner batch effects (1.5T vs 3T)
+### Cohorts
 
-### Imputation (3-tier)
-1. Longitudinal nearest-neighbor fill (±1 year window)
-2. MICE / IterativeImputer for remaining gaps
-3. Two-stage CSF imputation: LightGBM predicts ABETA from PET + MRI (R²=0.414)
+| Cohort | Transition | N (approx.) | Event rate |
+|---|---|---|---|
+| MCI | MCI → Dementia | ~825 | ~50% |
+| CN | CN → Decline | ~824 | ~18% |
 
-### Feature Engineering
-- ICV-normalized MRI volumes (Hippocampus, Entorhinal, Ventricles)
-- Amyloid composite (ABETA CSF + AV45 PET)
-- Neurodegeneration composite (TAU + PTAU + FDG)
-- Cognitive composites (ability + severity)
-- Pre-cutoff OLS slopes per feature (leakage-free — strictly pre-event visits only)
-- Slope velocity (acceleration) features
-- APOE4 interaction terms
-- Slope concordance (simultaneous cognitive + structural decline)
+### Imputation Strategy (3 tiers)
+
+1. **Longitudinal nearest-neighbor fill** — uses visits within ±1 year per subject
+2. **MICE** — multivariate imputation for remaining missingness
+3. **Two-stage CSF prediction** — LightGBM model predicts missing ABETA from PET/MRI features
+
+### Harmonization
+
+ComBat batch effect correction is applied to MRI volumetric features (Hippocampus, Entorhinal, Ventricles, Fusiform, MidTemp, WholeBrain) to remove scanner field strength bias (1.5T vs. 3T) while preserving biological variance.
 
 ### Models
-| Cell | Model | Notes |
-|------|-------|-------|
-| 14 | Cox PH | Baseline, PH assumption tested |
-| 15 | Random Survival Forest | 40-trial Optuna tuning |
-| 16 | LightGBM + XGBoost AFT | GPU-accelerated, SHAP analysis |
-| 17 | DeepSurv | Neural Cox PH via pycox |
-| 18 | DeepHit | Discrete-time survival |
-| 19 | Multistate Cox + Aalen-Johansen | CN→MCI→Dementia state-occupation probabilities |
-| 20 | Ensemble | Weighted + domain expert stacking |
-| 21–23 | Calibration, KM quartiles, comparison table | |
-| 24 | Longitudinal tensor | (958 subjects, 12 timepoints, 14 features) for future RNN/Transformer |
+
+| Model | Cohort | Test C-index |
+|---|---|---|
+| LightGBM Survival | MCI → Dementia | [PLACEHOLDER] |
+| LightGBM Survival | CN → Decline | [PLACEHOLDER] |
+| DeepSurv | MCI → Dementia | [PLACEHOLDER] |
+| DeepSurv | CN → Decline | [PLACEHOLDER] |
+| Ensemble | MCI → Dementia | [PLACEHOLDER] |
+| Ensemble | CN → Decline | [PLACEHOLDER] |
+
+> Results will be populated upon final model runs.
 
 ---
 
-## Key Findings
+## Module Reference
 
-- **Cognitive trajectory slopes dominate prediction**: `slope_LDELTOTAL` (Logical Memory) and `slope_CDRSB` are the top features across RSF and LightGBM importance — rate of decline matters more than snapshot severity for MCI→Dementia
-- **XGBoost AFT outperforms all models on CN→Decline** (0.884 vs 0.846 RSF): the AFT objective handles the long right tail of CN follow-up (up to 17 years) better than ranking-based objectives
-- **PH violations** for `slope_LDELTOTAL` (p=0.0005) and `slope_Hippocampus` (p=0.028) motivate the non-parametric models
-- **Direct CN→Dementia conversion is rare** (5 events / 824 subjects): almost all subjects transition through MCI first, validating the three-state model
-- **Domain ensemble meta-learner**: cognitive domain weight 0.888, imaging 0.431, CSF/PET −0.134 — biomarker signal is largely subsumed by cognitive trajectories once all domains are combined
+### `preprocessing.py`
 
----
+| Function | Inputs | Outputs | Description |
+|---|---|---|---|
+| `classify_reverters(df_all)` | Full longitudinal DataFrame | Dict of RID sets by group | Classifies MCI→CN reverters into trajectory groups |
+| `build_survival_labels(df_all, df_baseline, from_dx, to_dx)` | Longitudinal + baseline DFs, DX strings | DataFrame with event/duration per RID | Constructs survival labels for a given cohort transition |
+| `run_combat(df_baseline)` | Baseline DataFrame | Harmonized baseline DataFrame | Applies ComBat MRI batch correction |
+| `compute_slopes_cutoff(df_all, surv_labels, features)` | Longitudinal DF, survival labels, feature list | DataFrame of per-subject OLS slopes | Computes leakage-free longitudinal slopes |
+| `longitudinal_fill(df_all, features)` | Longitudinal DF, feature list | Filled DataFrame | Nearest-neighbor longitudinal imputation (Tier 1) |
+| `mice_impute(X_df)` | Feature DataFrame | Imputed DataFrame | MICE imputation via IterativeImputer (Tier 2) |
+| `assemble_cohort(df_baseline, surv_labels, slopes_df, ...)` | Multiple DFs | X, y_event, y_duration, RIDs | Merges baseline + slopes + labels into model-ready cohort |
+| `get_domain_features(feature_names)` | List of feature names | Dict of domain → feature lists | Separates features into imaging, CSF/PET, and cognitive domains |
 
-## Requirements
+### `modeling.py`
 
-```
-lifelines
-scikit-survival
-pycox
-lightgbm
-xgboost
-optuna
-shap
-scikit-learn
-neuroCombat
-torchtuples
-torch
-numpy
-pandas
-matplotlib
-seaborn
-scipy
-```
+| Function | Inputs | Outputs | Description |
+|---|---|---|---|
+| `lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label)` | Feature matrix, survival labels, feature names | C-index, importance series, fitted model | Optuna-tuned LightGBM survival model with 5-fold CV |
+| `run_deepsurv(X_imp, y_event, y_duration, label)` | Feature matrix, survival labels | CV C-index, fitted model, scaler | Optuna-tuned DeepSurv (pycox CoxPH) with early stopping |
+| `calc_deepsurv_c(model, scaler, X, y_event, y_duration)` | Fitted model + scaler, test data | Test C-index, survival DataFrame | Evaluates DeepSurv on held-out test set |
+| `weighted_ensemble(risk_score_dict, weights_dict, y_event, y_duration, label)` | Risk score and weight dicts, survival labels | Ensemble C-index, combined scores | Weighted average ensemble using C-index weights |
+| `build_csf_imputer(df_baseline)` | Baseline DataFrame | Fitted LGB regressor, predictor cols | Trains CSF ABETA predictor from PET/MRI (Tier 3 imputation) |
+| `save_checkpoint(name, obj)` | Name string, any object | — | Pickles object to `checkpoints/<name>.pkl` |
+| `load_checkpoint(name)` | Name string | Unpickled object or None | Loads checkpoint if it exists |
 
-Install via:
-```bash
-pip install lifelines scikit-survival pycox lightgbm xgboost optuna shap \
-            neuroCombat torchtuples --quiet
-```
+### `postprocessing.py`
+
+| Function | Inputs | Outputs | Description |
+|---|---|---|---|
+| `calibration_plot(X_imp, y_event, y_duration, predict_proba_fn, horizon, model_name, cohort)` | Feature matrix, labels, prediction function, horizon | Saved calibration plot | Decile calibration plot at fixed time horizon |
+| `km_risk_quartile(risk_scores, y_event, y_duration, model_name, cohort)` | Risk scores, survival labels | Saved KM plot | Kaplan-Meier curves stratified by risk quartile |
+| `build_subject_time_matrix(df_all, rids, time_grid, features)` | Longitudinal DF, RID list, time grid, features | (n_subjects, n_timepoints, n_features) tensor + mask | Builds aligned longitudinal tensor for transformer input |
 
 ---
 
-## Reproducing Results
+## Reproducibility Notes
 
-1. Mount Google Drive and place the ADNI CSV at the path above
-2. Open `ADNI_Survival_Pipeline.ipynb` in Google Colab (Pro recommended, T4 GPU)
-3. Run Cell 1 to install dependencies, then restart runtime
-4. Run all cells sequentially (Cells 2–24)
-5. Outputs saved to `/content/drive/MyDrive/ADNI_capstone/outputs/`
-
-Total runtime: approximately 2–3 hours on T4 GPU (dominated by RSF Optuna tuning ~21 min, DeepSurv ~3 min, DeepHit ~3 min)
-
----
-
-## Citation
-
-Data used in preparation of this project were obtained from the Alzheimer's Disease Neuroimaging Initiative (ADNI) database (adni.loni.usc.edu). The ADNI was launched in 2003 as a public-private partnership, led by Principal Investigator Michael W. Weiner, MD.
-
-> Petersen RC, et al. Alzheimer's Disease Neuroimaging Initiative (ADNI): Clinical characterization. *Neurology*. 2010;74(3):201-209.
+- All random seeds are set via `RANDOM_SEED = 42` and passed explicitly to all models, CV splitters, and imputers.
+- Model checkpoints are saved after each training run. Set `RETRAIN = False` to reproduce results from saved checkpoints without retraining.
+- All figures are saved to `Baseline/figures/` automatically during notebook execution.
+- ADNI data must not be committed to this repository per the ADNI Data Use Agreement. The `.gitignore` excludes all CSV files in `Baseline/tables/`.
