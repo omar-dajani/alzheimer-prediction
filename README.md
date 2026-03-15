@@ -45,10 +45,16 @@ The dataset used in this project was created using the ADNIMERGE package in RStu
 To construct the dataset used in this project, the relevant tables were first loaded in RStudio and exported as CSV files. Because the datasets originate from multiple ADNI phases and package tables, visit codes were standardized across all datasets prior to merging. This ensured that visits from different phases corresponded to a consistent naming scheme.
 
 After standardizing the visit codes, the tables were merged using the following identifiers:
-RID – unique participant identifier
-VISCODE – standardized visit code representing the visit timepoint
+`RID` – unique participant identifier
+`VISCODE` – standardized visit code representing the visit timepoint
 
 Standardizing these identifiers allowed records from different package datasets to be aligned correctly for the same participant and visit. The merged dataset therefore contains longitudinal participant information, including demographics, diagnostic labels, and MRI-derived measurements.
+
+The following tables were used in this pipeline and exported as CSV files:
+adrs.csv – cognitive assessment scores (ADAS-related measures)
+`biomarkers.csv` – biomarker measurements
+`subjects.csv` – participant demographic and subject-level information
+`UCSFFSX7.csv` – structural MRI measurements derived from FreeSurfer segmentation
 
 > Describe here: which ADNI tables were downloaded, how the merge was performed, what the final merged file is named, and where to place it in the directory before running the notebook.
 
