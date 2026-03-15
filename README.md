@@ -50,10 +50,10 @@ After standardizing the visit codes, the tables were merged using the following 
 
 Standardizing these identifiers allowed records from different package datasets to be aligned correctly for the same participant and visit. The merged dataset therefore contains longitudinal participant information, including demographics, diagnostic labels, and MRI-derived measurements.
 
-The following tables were used in this pipeline and exported as CSV files:
-adrs.csv – cognitive assessment scores (ADAS-related measures)
-`biomarkers.csv` – biomarker measurements
-`subjects.csv` – participant demographic and subject-level information
+The following tables were used in this pipeline and exported as CSV files:<br>
+`adrs.csv` – cognitive assessment scores (ADAS-related measures)<br>
+`biomarkers.csv` – biomarker measurements<br>
+`subjects.csv` – participant demographic and subject-level information<br>
 `UCSFFSX7.csv` – structural MRI measurements derived from FreeSurfer segmentation
 
 > Describe here: which ADNI tables were downloaded, how the merge was performed, what the final merged file is named, and where to place it in the directory before running the notebook.
