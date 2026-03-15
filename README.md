@@ -7,7 +7,7 @@ A multistate survival analysis pipeline for predicting Alzheimer's disease progr
 
 ## Team
 
-**Students:** Nathon Chavez, Omar Dajani, Eliza Iqbal, Savannah Nix, Fabrizio Pacheco, Evie Roth, Schichen Tang
+**Students:** Nathon Chavez, Omar Dajani, Eliza Iqbal, Savannah Nix, Fabrizio Pacheco, Evie Roth, Shichen Tang
 
 **Sponsor:** Antonio Mendoza Gonzales
 
