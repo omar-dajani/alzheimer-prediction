@@ -196,10 +196,8 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
                   n_trials=20, seed=RANDOM_SEED):
     torch.manual_seed(seed)
     np.random.seed(seed)
-
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_imp.values).astype(np.float32)
-
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
 
     def objective(trial):
@@ -231,17 +229,20 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
     study = optuna.create_study(direction='maximize')
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
     best = study.best_params
-    
     print(f'  [{label}] DeepSurv best C-td: {study.best_value:.4f} | {best}')
 
-    # Refit final model on all data
+    # Refit final model with explicit val split for early stopping
     net = tt.practical.MLPVanilla(
         X_scaled.shape[1], best['hidden'], 1,
         batch_norm=True, dropout=best['dropout'])
     final = PycoxCoxPH(net, tt.optim.Adam(best['lr']))
     y_all = (y_duration.astype(np.float32), y_event.astype(np.float32))
-    final.fit(X_scaled, y_all, best['batch'], 200, verbose=False,
-              val_size=0.2,
+    n_val = int(len(X_scaled) * 0.2)
+    X_tr_f, X_va_f = X_scaled[:-n_val], X_scaled[-n_val:]
+    y_tr_f = (y_all[0][:-n_val], y_all[1][:-n_val])
+    y_va_f = (y_all[0][-n_val:], y_all[1][-n_val:])
+    final.fit(X_tr_f, y_tr_f, best['batch'], 200, verbose=False,
+              val_data=(X_va_f, y_va_f),
               callbacks=[tt.callbacks.EarlyStopping(patience=15)])
     final.compute_baseline_hazards()
     return study.best_value, final, scaler
