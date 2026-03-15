@@ -101,26 +101,29 @@ pip install lifelines scikit-survival pycox lightgbm xgboost optuna shap \
 
 Open `ADNI_Survival_Pipeline.ipynb` in Google Colab and run cells sequentially. The notebook is organized into clearly labeled sections:
 
-| Cell | Description |
-|---|---|
-| 1 | Install dependencies |
-| 2 | Imports and global config |
-| 3 | Data loading and DX harmonization |
-| 4 | Reversion removal |
-| 5 | Survival label construction |
-| 6 | Batch effect / ComBat harmonization |
-| 7 | Longitudinal slope computation |
-| 8 | Tiered imputation (longitudinal fill → MICE → CSF) |
-| 9 | Feature engineering |
-| 10 | Cohort assembly and final imputation |
-| 11 | Domain-separated feature sets |
-| 12 | Evaluation framework setup |
-| 13 | Two-stage CSF imputation |
-| 16 | LightGBM survival model |
-| 17 | DeepSurv neural Cox model |
-| 20 | Ensemble strategies |
-| 21–23 | Calibration, KM curves, model comparison table |
-| 24 | Subject × time matrix for future transformer use |
+
+| # | Stage | Description |
+|---|-------|-------------|
+| 1 | Setup | Install dependencies, configure paths and constants |
+| 2 | Data Loading | Load ADNIMERGE CSV, harmonize diagnosis labels |
+| 3 | Reversion Removal | Exclude MCI to CN reverters per sponsor guidance |
+| 4 | Survival Labels | Construct event/duration labels for each cohort |
+| 5 | Harmonization | Audit and correct MRI scanner batch effects via ComBat |
+| 6 | Slope Computation | Compute leakage-free longitudinal OLS slopes per subject |
+| 7 | Imputation | Three-tier strategy: longitudinal fill, MICE, CSF prediction |
+| 8 | Feature Engineering | ICV-normalized MRI, composites, interaction terms |
+| 9 | Cohort Assembly | Merge baseline + slopes + labels; final MICE pass |
+| 10 | Domain Feature Sets | Separate features by modality for domain analysis |
+| 11 | Evaluation Framework | C-index, time-dependent AUC, calibration utilities |
+| 12 | CSF Imputation | Two-stage LightGBM model to predict missing ABETA |
+| 13 | LightGBM Survival | Gradient boosting with log-risk target and Optuna tuning |
+| 14 | DeepSurv | Neural Cox proportional hazards model |
+| 15 | Ensemble | Weighted risk-score averaging across models |
+| 16 | Calibration and AUC | Calibration plots and horizon AUC evaluation |
+| 17 | KM Risk Curves | Kaplan-Meier curves stratified by predicted risk quartile |
+| 18 | Results Table | Final ranked model comparison |
+| 19 | Time Matrix | Subject x time tensor for future transformer input |
+
 
 ### Retraining vs. loading from checkpoint
 
