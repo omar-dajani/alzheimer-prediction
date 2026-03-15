@@ -41,7 +41,14 @@ alzheimer-prediction/
 
 This pipeline uses a merged dataset combining ADNIMERGE and ADNI4 data.
 
-**[PLACEHOLDER — to be completed by data pipeline lead]**
+The dataset used in this project was created using the ADNIMERGE package in RStudio, which contains curated ADNI datasets covering all study phases up to ADNI4. Within the R package, the data are distributed across multiple datasets (tables) rather than a single unified file.
+To construct the dataset used in this project, the relevant tables were first loaded in RStudio and exported as CSV files. Because the datasets originate from multiple ADNI phases and package tables, visit codes were standardized across all datasets prior to merging. This ensured that visits from different phases corresponded to a consistent naming scheme.
+
+After standardizing the visit codes, the tables were merged using the following identifiers:
+RID – unique participant identifier
+VISCODE – standardized visit code representing the visit timepoint
+
+Standardizing these identifiers allowed records from different package datasets to be aligned correctly for the same participant and visit. The merged dataset therefore contains longitudinal participant information, including demographics, diagnostic labels, and MRI-derived measurements.
 
 > Describe here: which ADNI tables were downloaded, how the merge was performed, what the final merged file is named, and where to place it in the directory before running the notebook.
 
