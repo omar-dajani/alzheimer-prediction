@@ -35,7 +35,7 @@ print(f'LightGBM device: {LGB_DEVICE}')
 
 
 def save_checkpoint(name, obj):
-        """
+    """
     Serialize and save a Python object to disk as a .pkl file in CHECKPOINT_DIR.
 
     Used to persist trained models and results between pipeline runs, allowing
@@ -57,7 +57,7 @@ def save_checkpoint(name, obj):
 
 
 def load_checkpoint(name):
-        """
+    """
     Load a previously saved .pkl checkpoint from CHECKPOINT_DIR if it exists.
 
     Returns None silently if the checkpoint file is not found, allowing the
@@ -209,7 +209,7 @@ def build_csf_imputer(df_baseline, target_col='ABETA', seed=RANDOM_SEED):
 
 def lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label,
                      n_trials=30, seed=RANDOM_SEED):
-                         """
+    """
     Train and tune a LightGBM survival model using a log-risk regression target,
     with Optuna Bayesian hyperparameter optimization and stratified cross-validation.
 
@@ -283,7 +283,7 @@ def lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label,
 
 def run_deepsurv(X_imp, y_event, y_duration, label,
                   n_trials=20, seed=RANDOM_SEED):
-                      """
+    """
     Train and tune a DeepSurv (neural Cox PH) model using pycox and torchtuples,
     with Optuna hyperparameter optimization over architecture and training params.
 
