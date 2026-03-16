@@ -1,7 +1,8 @@
 Model,Cohort,C-index,C-std
 DeepSurv,CN->Decline,0.7000,0.0000
 LightGBM Survival,CN->Decline,0.6204,0.0000
-Weighted Ensemble,MCI->Dementia,0.8957,0.0000
-Domain Ensemble,MCI->Dementia,0.8957,0.0000
+Weighted Ensemble,CN->Dementia,0.8393,0.0000
+Weighted Ensemble,MCI->Dementia,0.8939,0.0000
+Domain Ensemble,MCI->Dementia,0.8939,0.0000
 DeepSurv,MCI->Dementia,0.8478,0.0000
 LightGBM Survival,MCI->Dementia,0.8033,0.0000
