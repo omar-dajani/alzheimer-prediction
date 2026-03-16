@@ -145,6 +145,26 @@ def run_combat(df_baseline):
 
     
 def plot_before_after(df_baseline, feature='Hippocampus_ICV'):
+    """
+    Plot 2×2 histograms comparing ICV-normalized MRI feature distributions
+    before and after ComBat harmonization, stratified by ADNI phase and
+    field strength.
+
+    Requires that ComBat was applied and the pre-harmonization values were
+    stored in a '<feature_base>_raw' column. Silently skips if ComBat was
+    not run.
+
+    Args:
+        df_baseline (pd.DataFrame): Baseline DataFrame containing both raw
+            and harmonized feature columns, plus 'COLPROT', 'FLDSTRENG',
+            and 'ICV'.
+        feature (str): ICV-normalized column name to visualize, e.g.
+            'Hippocampus_ICV' or 'Entorhinal_ICV'. Default 'Hippocampus_ICV'.
+
+    Returns:
+        None. Saves a 2×2 figure to FIG_DIR as
+        'combat_before_after_<feature_base>.png'.
+    """
     base    = feature.replace('_ICV', '')
     raw_col = f'{base}_raw_ICV'
 
@@ -183,6 +203,28 @@ def plot_before_after(df_baseline, feature='Hippocampus_ICV'):
 
 
 def harmonization_report(df_baseline):
+    """
+    Print a statistical validation report for ComBat MRI harmonization,
+    comparing mean Hippocampus/ICV values before and after correction.
+
+    Reports include:
+    - Per-ADNI-phase mean before/after with delta
+    - Per-field-strength mean before/after
+    - 1.5T vs 3T gap size and percentage reduction
+    - Kruskal-Wallis test across phases before and after
+
+    Note: Residual significance after ComBat is expected and reflects real
+    biological differences between ADNI cohorts (ADNI1 was sicker than ADNI3),
+    not scanner artefacts.
+
+    Args:
+        df_baseline (pd.DataFrame): Baseline DataFrame. Must contain
+            'Hippocampus_raw' column (set during ComBat); silently exits
+            if ComBat was not applied.
+
+    Returns:
+        None. Prints report to stdout.
+    """
     if 'Hippocampus_raw' not in df_baseline.columns:
         print("ComBat was not applied -- nothing to validate.")
         return
@@ -285,6 +327,18 @@ def compute_slopes_cutoff(df_all, surv_labels, features, min_visits=2):
 
     
 def longitudinal_fill(df_all, features, window_yr=1.0):
+        """
+    Tier-1 imputation: fill missing values using the nearest longitudinal
+    observation within a ±window_yr time window for each subject.
+
+    Args:
+        df_all (pd.DataFrame): Full longitudinal DataFrame with 'RID' and 'Years_bl'.
+        features (list[str]): Column names to impute.
+        window_yr (float): Maximum time gap (years) to borrow a value from. Default 1.0.
+
+    Returns:
+        pd.DataFrame: Copy of df_all with NaNs filled where a nearby observation exists.
+    """
     df_out = df_all.copy()
     for rid, grp in df_all.groupby('RID'):
         grp = grp.sort_values('Years_bl')
@@ -305,11 +359,41 @@ def longitudinal_fill(df_all, features, window_yr=1.0):
     return df_out
 
 def mice_impute(X_df, max_iter=10, seed=RANDOM_SEED):
+        """
+    Tier-2 imputation: apply MICE (Multiple Imputation by Chained Equations)
+    via sklearn's IterativeImputer to fill any remaining NaNs after longitudinal fill.
+
+    Args:
+        X_df (pd.DataFrame): Feature matrix with remaining NaN values.
+        max_iter (int): Maximum MICE iterations. Default 10.
+        seed (int): Random seed for reproducibility.
+
+    Returns:
+        pd.DataFrame: Fully imputed DataFrame with same shape, columns, and index as X_df.
+    """
     imp = IterativeImputer(max_iter=max_iter, random_state=seed)
     arr = imp.fit_transform(X_df)
     return pd.DataFrame(arr, columns=X_df.columns, index=X_df.index)
 
 def assemble_cohort(df_baseline, surv_labels, slopes_df, core_features, slope_all_cols):
+        """
+    Join baseline features, survival labels, and longitudinal slopes into a
+    single modeling-ready DataFrame for one cohort.
+
+    Args:
+        df_baseline (pd.DataFrame): Baseline visit data with 'RID' column.
+        surv_labels (pd.DataFrame): Survival labels indexed by RID with 'event' and 'duration'.
+        slopes_df (pd.DataFrame): Per-subject slope features with 'RID' column.
+        core_features (list[str]): Baseline feature columns to include.
+        slope_all_cols (list[str]): Slope feature column names to merge in.
+
+    Returns:
+        tuple: (X, y_event, y_duration, rids)
+            X (pd.DataFrame): Feature matrix.
+            y_event (np.ndarray): Binary event indicators.
+            y_duration (np.ndarray): Time-to-event or censoring in years.
+            rids (list): Subject IDs in row order.
+    """
     merged = (
         df_baseline.set_index('RID')
         .join(surv_labels[['event','duration']], how='inner')
@@ -328,6 +412,21 @@ def assemble_cohort(df_baseline, surv_labels, slopes_df, core_features, slope_al
     )
 
 def add_slope_concordance(X):
+     """
+    Add a binary concordance feature indicating simultaneous cognitive and
+    structural decline — both MMSE slope and Hippocampus slope are negative.
+
+    Subjects showing decline on both axes are considered to have concordant
+    biomarker progression, which is a stronger signal for conversion risk.
+
+    Args:
+        X (pd.DataFrame): Feature matrix containing 'slope_MMSE' and
+            'slope_Hippocampus' columns (if available).
+
+    Returns:
+        pd.DataFrame: Copy of X with an added 'slope_concordance' column
+            (1.0 = both declining, 0.0 = otherwise).
+    """
     X = X.copy()
     cog_decline = (X['slope_MMSE'] < 0).astype(float) if 'slope_MMSE' in X.columns else 0
     mri_decline = (X['slope_Hippocampus'] < 0).astype(float) if 'slope_Hippocampus' in X.columns else 0
@@ -335,6 +434,24 @@ def add_slope_concordance(X):
     return X
 
 def get_domain_features(feature_names):
+     """
+    Partition the full feature list into domain-specific subsets for
+    modality-separated modeling experiments.
+
+    Demographics, APOE4, missingness flags, and protocol dummies are
+    appended to every non-combined domain as a shared base set.
+
+    Args:
+        feature_names (list[str]): Full list of feature column names
+            for a given cohort (e.g. feature_names_mci).
+
+    Returns:
+        dict: Four keys mapping to feature lists:
+            'imaging'  — ICV-normalized MRI volumes + base features.
+            'csf_pet'  — CSF biomarkers, PET, amyloid/tau composites + base.
+            'cognitive'— Cognitive scores, composites, Ecog + base.
+            'combined' — All features (no filtering).
+    """
     domains = {
         'imaging': [f for f in feature_names if any(x in f for x in
             ['Hippocampus','Entorhinal','Ventricles','Fusiform',
@@ -358,6 +475,15 @@ def get_domain_features(feature_names):
 
 
 def test_tqdm():
+        """
+    Smoke test to verify tqdm progress bars render correctly in the current
+    environment (Colab notebook vs local terminal).
+
+    Runs a short dummy loop with a tqdm progress bar. No side effects.
+
+    Returns:
+        None. Prints a confirmation message on success.
+    """
     import time
     for i in tqdm(range(20), desc="Testing bar"):
         time.sleep(0.2)
