@@ -21,8 +21,8 @@ from sklearn.preprocessing import StandardScaler
 # Ensemble imports
 from sklearn.linear_model import RidgeCV
 
-
-CHECKPOINT_DIR = Path.cwd() / 'checkpoints'
+BASE_DIR       = Path(__file__).parent   # resolves to Baseline/ regardless of CWD
+CHECKPOINT_DIR = BASE_DIR / 'checkpoints'
 RANDOM_SEED = 42
 N_FOLDS = 5
 HORIZONS = [3, 5]  # years for fixed-h
