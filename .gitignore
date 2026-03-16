@@ -1,1 +1,14 @@
-Baseline/tables
+# Data (ADNI DUA — never commit)
+Baseline/tables/*.csv
+
+# OS
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
