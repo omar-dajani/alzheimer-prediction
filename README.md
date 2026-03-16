@@ -120,20 +120,19 @@ Open `ADNI_Survival_Pipeline.ipynb` in Google Colab and run cells sequentially. 
 | 3 | Reversion Removal | Exclude MCI to CN reverters per sponsor guidance |
 | 4 | Survival Labels | Construct event/duration labels for each cohort |
 | 5 | Harmonization | Audit and correct MRI scanner batch effects via ComBat |
-| 6 | Slope Computation | Compute leakage-free longitudinal OLS slopes per subject |
-| 7 | Imputation | Three-tier strategy: longitudinal fill, MICE, CSF prediction |
-| 8 | Feature Engineering | ICV-normalized MRI, composites, interaction terms |
-| 9 | Cohort Assembly | Merge baseline + slopes + labels; final MICE pass |
-| 10 | Domain Feature Sets | Separate features by modality for domain analysis |
-| 11 | Evaluation Framework | C-index, time-dependent AUC, calibration utilities |
-| 12 | CSF Imputation | Two-stage LightGBM model to predict missing ABETA |
-| 13 | LightGBM Survival | Gradient boosting with log-risk target and Optuna tuning |
-| 14 | DeepSurv | Neural Cox proportional hazards model |
-| 15 | Ensemble | Weighted risk-score averaging across models |
-| 16 | Calibration and AUC | Calibration plots and horizon AUC evaluation |
-| 17 | KM Risk Curves | Kaplan-Meier curves stratified by predicted risk quartile |
-| 18 | Results Table | Final ranked model comparison |
-| 19 | Time Matrix | Subject x time tensor for future transformer input |
+| 6 | Imputation | Three-tier strategy: longitudinal fill, MICE, CSF prediction |
+| 7 | Feature Engineering | ICV-normalized MRI, composites, interaction terms |
+| 8 | Cohort Assembly | Merge baseline + slopes + labels; final MICE pass |
+| 9 | Domain Feature Sets | Separate features by modality for domain analysis |
+| 10 | Evaluation Framework | C-index, time-dependent AUC, calibration utilities |
+| 11 | CSF Imputation | Two-stage LightGBM model to predict missing ABETA |
+| 12 | LightGBM Survival | Gradient boosting with log-risk target and Optuna tuning |
+| 13 | DeepSurv | Neural Cox proportional hazards model |
+| 14 | Ensemble | Weighted risk-score averaging across models |
+| 15 | Calibration and AUC | Calibration plots and horizon AUC evaluation |
+| 16 | KM Risk Curves | Kaplan-Meier curves stratified by predicted risk quartile |
+| 17 | Results Table | Final ranked model comparison |
+
 
 
 ### Retraining vs. loading from checkpoint
@@ -210,7 +209,6 @@ ComBat batch effect correction is applied to MRI volumetric features (Hippocampu
 | `classify_reverters(df_all)` | Full longitudinal DataFrame | Dict of RID sets by group | Classifies MCI→CN reverters into trajectory groups |
 | `build_survival_labels(df_all, df_baseline, from_dx, to_dx)` | Longitudinal + baseline DFs, DX strings | DataFrame with event/duration per RID | Constructs survival labels for a given cohort transition |
 | `run_combat(df_baseline)` | Baseline DataFrame | Harmonized baseline DataFrame | Applies ComBat MRI batch correction |
-| `compute_slopes_cutoff(df_all, surv_labels, features)` | Longitudinal DF, survival labels, feature list | DataFrame of per-subject OLS slopes | Computes leakage-free longitudinal slopes |
 | `longitudinal_fill(df_all, features)` | Longitudinal DF, feature list | Filled DataFrame | Nearest-neighbor longitudinal imputation (Tier 1) |
 | `mice_impute(X_df)` | Feature DataFrame | Imputed DataFrame | MICE imputation via IterativeImputer (Tier 2) |
 | `assemble_cohort(df_baseline, surv_labels, slopes_df, ...)` | Multiple DFs | X, y_event, y_duration, RIDs | Merges baseline + slopes + labels into model-ready cohort |
