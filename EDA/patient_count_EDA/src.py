@@ -6,6 +6,9 @@ import scipy.stats as stats
 
 
 def run_batch_anova(dataframe, target_col):
+    '''
+    Performs One-Way ANOVA tests for each numerical feature in the dataframe against the specified target column.
+    '''
     # 1. Select only numerical columns to test against the target
     numerical_cols = dataframe.select_dtypes(include=['number']).columns.tolist()
     
@@ -42,6 +45,11 @@ def run_batch_anova(dataframe, target_col):
     return results_df
 
 def plot_diagnosis_distribution(df, variable_name, target_col='DIAGNOSIS'):
+    '''
+    Plots the distribution of a specified variable across different diagnostic groups.
+    Assuming your dataframe is 'df' and you want to plot 'FA_FXST_L'
+    plot_diagnosis_distribution(df, 'FA_FXST_L')
+    '''
     # 1. Drop missing values for the specific columns we are plotting
     plot_data = df[[variable_name, target_col]].dropna()
     
@@ -74,12 +82,16 @@ def plot_diagnosis_distribution(df, variable_name, target_col='DIAGNOSIS'):
     plt.tight_layout()
     plt.show()
 
-# Example usage:
-# Assuming your dataframe is 'df' and you want to plot 'FA_FXST_L'
-# plot_diagnosis_distribution(df, 'FA_FXST_L')
+
+
 
 
 def plot_specific_patients(df, variable_name, patient_list):
+    '''
+    Plots the longitudinal progression of a specified variable for a specific list of patients.
+    my_patients = ['011_S_0002', '011_S_0003', '022_S_0004']
+    plot_specific_patients(df, 'FA_FXST_L', my_patients)
+    '''
     # 1. Create a copy to avoid altering the original dataframe
     plot_df = df.copy()
     
@@ -130,11 +142,15 @@ def plot_specific_patients(df, variable_name, patient_list):
     plt.tight_layout()
     plt.show()
 
-# Example usage:
-# my_patients = ['011_S_0002', '011_S_0003', '022_S_0004']
-# plot_specific_patients(df, 'FA_FXST_L', my_patients)
+
 
 def plot_patient_progression(df, variable_name, n_patients=10):
+    '''
+    Plots the longitudinal progression of a specified variable for a random selection of patients.
+    Example usage:
+    Assuming your dataframe is named 'df' and you want to plot 'FA_FXST_L'
+    plot_patient_progression(df, 'FA_FXST_L')    
+    '''
     # 1. Create a copy to avoid SettingWithCopy warnings
     plot_df = df.copy()
     
@@ -181,6 +197,18 @@ def plot_patient_progression(df, variable_name, n_patients=10):
     plt.tight_layout()
     plt.show()
 
-# Example usage:
-# Assuming your dataframe is named 'df' and you want to plot 'FA_FXST_L'
-# plot_patient_progression(df, 'FA_FXST_L')
+def getyear(x):
+    getyear_dict = {
+    "sc":-1,
+    "4_sc":-1,
+    "y2":2,
+    "y1":1,
+    "init":0,
+    "4_init":0,
+    "y4":4,
+    "4_m12":1,
+    "y3":3,
+    "y5":5,
+    "4_m24":2,
+}
+    return getyear_dict[x]
