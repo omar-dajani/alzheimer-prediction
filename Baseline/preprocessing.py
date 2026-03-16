@@ -16,7 +16,8 @@ import time
 
 MRI_HARMONIZE_COLS = ['Hippocampus', 'Entorhinal', 'Ventricles', 'Fusiform', 'MidTemp', 'WholeBrain'] # Features that need harmonization
 RANDOM_SEED = 42
-FIG_DIR = Path.cwd() / 'figures'
+BASE_DIR       = Path(__file__).parent   # resolves to Baseline/ regardless of CWD
+FIG_DIR        = BASE_DIR / 'figures'
 
 
 
