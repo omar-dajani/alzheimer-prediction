@@ -106,6 +106,34 @@ pip install lifelines scikit-survival pycox lightgbm xgboost optuna shap \
 
 ---
 
+## Running Locally (without Colab)
+
+**Option A — pip + virtualenv**
+```bash
+git clone https://github.com/omar-dajani/alzheimerprediction.git
+cd alzheimerprediction
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+# Place ADNIMERGE_28Feb2026.csv in Baseline/tables/
+cd Baseline
+jupyter notebook ADNI_Survival_Pipeline.ipynb
+```
+
+**Option B — conda**
+```bash
+conda env create -f environment.yml
+conda activate adni-survival
+cd Baseline
+jupyter notebook ADNI_Survival_Pipeline.ipynb
+```
+
+> **Note on GPU:** The LightGBM tuning step uses GPU by default but auto-detects
+> and falls back to CPU. Training will be slower on CPU (~10–20 min extra).
+
+> **Note on neuroCombat:** Install via `pip install neuroCombat`. If you get a
+> version conflict, try `pip install neuroCombat-sklearn` instead.
+
 ## Usage
 
 ### Running the full pipeline
