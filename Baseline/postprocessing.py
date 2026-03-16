@@ -4,10 +4,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import lightgbm as lgb
 import pandas as pd
-from modeling import binary_horizon_dataset
+from Baseline.modeling import binary_horizon_dataset
 
 RANDOM_SEED = 42
-FIG_DIR = Path.cwd() / 'figures'
+BASE_DIR       = Path(__file__).parent   # resolves to Baseline/ regardless of CWD
+FIG_DIR        = BASE_DIR / 'figures'
 
 
 def calibration_plot(X_imp, y_event, y_duration, predict_proba_fn,
