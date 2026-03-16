@@ -27,6 +27,16 @@ RANDOM_SEED = 42
 N_FOLDS = 5
 HORIZONS = [3, 5]  # years for fixed-h
 
+# ── GPU detection ─────────────────────────────────────────────────────────────
+try:
+    import lightgbm as lgb_test
+    _test_params = {'device': 'gpu', 'verbose': -1, 'n_estimators': 1}
+    lgb_test.LGBMRegressor(**_test_params).fit([[1]], [1])
+    LGB_DEVICE = 'gpu'
+except Exception:
+    LGB_DEVICE = 'cpu'
+print(f'LightGBM device: {LGB_DEVICE}')
+
 
 def save_checkpoint(name, obj):
     path = CHECKPOINT_DIR / f'{name}.pkl'
@@ -149,7 +159,7 @@ def lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label,
     def objective(trial):
         params = dict(
             objective='regression_l1',
-            device='gpu',
+            device=LGB_DEVICE,
             learning_rate=trial.suggest_float('lr', 0.02, 0.1, log=True),
             num_leaves=trial.suggest_int('num_leaves', 31, 127),
             min_child_samples=trial.suggest_int('min_child_samples', 10, 50),
