@@ -21,6 +21,8 @@ from sklearn.preprocessing import StandardScaler
 # Ensemble imports
 from sklearn.linear_model import RidgeCV
 
+from config import RANDOM_SEED, N_FOLDS, HORIZONS, FIG_DIR, CHECKPOINT_DIR, OUT_DIR, MRI_HARMONIZE_COLS, BASE_DIR
+
 # ── GPU detection ─────────────────────────────────────────────────────────────
 try:
     import lightgbm as lgb_test
