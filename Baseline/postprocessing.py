@@ -50,10 +50,27 @@ def calibration_plot(X_imp, y_event, y_duration, predict_proba_fn,
 
 
 def lgb_horizon_proba(X, horizon, y_ev, y_dur, X_train, y_ev_tr, y_dur_tr):
-    '''
-    LightGBM binary horizon prediction function
-    Train LGB binary model and return probabilities on X.
-    '''
+    """
+    Train a LightGBM binary classifier for fixed-horizon survival prediction
+    and return predicted event probabilities on a test set.
+
+    Uses binary_horizon_dataset to construct labels, excluding censored
+    subjects with follow-up shorter than the horizon. Class imbalance is
+    addressed via scale_pos_weight.
+
+    Args:
+        X (pd.DataFrame): Test feature matrix to generate predictions for.
+        horizon (int or float): Prediction horizon in years (e.g. 3 or 5).
+        y_ev (np.ndarray): Event indicators for the test set.
+        y_dur (np.ndarray): Durations for the test set in years.
+        X_train (pd.DataFrame): Training feature matrix.
+        y_ev_tr (np.ndarray): Event indicators for the training set.
+        y_dur_tr (np.ndarray): Durations for the training set in years.
+
+    Returns:
+        np.ndarray: Predicted probabilities of event within `horizon` years,
+            for the subset of test subjects with determinable outcomes.
+    """
     y_bin_tr, include_tr = binary_horizon_dataset(y_ev_tr, y_dur_tr, horizon)
     X_tr_h = X_train.iloc[include_tr]
     scale_pos = (y_bin_tr==0).sum() / max((y_bin_tr==1).sum(), 1)
@@ -66,6 +83,29 @@ def lgb_horizon_proba(X, horizon, y_ev, y_dur, X_train, y_ev_tr, y_dur_tr):
     return m.predict_proba(X.iloc[include_te])[:,1]
 
 def km_risk_quartile(risk_scores, y_event, y_duration, model_name, cohort):
+  """
+    Plot Kaplan-Meier survival curves stratified by predicted risk quartile.
+
+    Subjects are divided into four equal-sized quartiles (Q1=lowest risk,
+    Q4=highest risk) based on model risk scores. A well-discriminating model
+    produces widely separated KM curves between Q1 and Q4.
+
+    Quartiles with fewer than 5 subjects are skipped to avoid unstable
+    KM estimates.
+
+    Args:
+        risk_scores (np.ndarray): Continuous risk scores output by a model,
+            where higher values indicate higher predicted risk.
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        model_name (str): Model label used in the plot title and output filename
+            (spaces replaced with underscores in filename).
+        cohort (str): Cohort label e.g. 'MCI->Dementia', used in title and filename.
+
+    Returns:
+        None. Saves figure to FIG_DIR as
+        'km_quartile_<model_name>_<cohort>.png'.
+    """
     quartile = pd.qcut(risk_scores, 4, labels=['Q1 (low)','Q2','Q3','Q4 (high)'])
     colors   = ['#2ecc71','#f1c40f','#e67e22','#e74c3c']
     fig, ax  = plt.subplots(figsize=(9, 6))
