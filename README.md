@@ -213,18 +213,18 @@ This strips the widget metadata and rewrites the file cleanly. Then commit the c
 
 ComBat batch effect correction is applied to MRI volumetric features (Hippocampus, Entorhinal, Ventricles, Fusiform, MidTemp, WholeBrain) to remove scanner field strength bias (1.5T vs. 3T) while preserving biological variance.
 
-### Models
+## Model Performance
 
-| Model | Cohort | Test C-index |
-|---|---|---|
-| LightGBM Survival | MCI → Dementia | [PLACEHOLDER] |
-| LightGBM Survival | CN → Decline | [PLACEHOLDER] |
-| DeepSurv | MCI → Dementia | [PLACEHOLDER] |
-| DeepSurv | CN → Decline | [PLACEHOLDER] |
-| Ensemble | MCI → Dementia | [PLACEHOLDER] |
-| Ensemble | CN → Decline | [PLACEHOLDER] |
+| Model | Cohort | C-index |
+|-------|--------|---------|
+| Weighted Ensemble | MCI → Dementia | 0.8957 |
+| Domain Ensemble | MCI → Dementia | 0.8957 |
+| DeepSurv | MCI → Dementia | 0.8478 |
+| LightGBM Survival | MCI → Dementia | 0.8033 |
+| DeepSurv | CN → Decline | 0.7000 |
+| LightGBM Survival | CN → Decline | 0.6204 |
 
-> Results will be populated upon final model runs.
+> C-index > 0.70 is generally considered indicative of good discriminative performance in clinical survival models. The MCI → Dementia cohort presents a stronger signal due to higher event rates; the CN → Decline cohort is an inherently harder prediction task.
 
 ---
 
