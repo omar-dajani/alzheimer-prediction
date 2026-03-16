@@ -5,10 +5,7 @@ import matplotlib.pyplot as plt
 import lightgbm as lgb
 import pandas as pd
 from Baseline.modeling import binary_horizon_dataset
-
-RANDOM_SEED = 42
-BASE_DIR       = Path(__file__).parent   # resolves to Baseline/ regardless of CWD
-FIG_DIR        = BASE_DIR / 'figures'
+from config import RANDOM_SEED, N_FOLDS, HORIZONS, FIG_DIR, CHECKPOINT_DIR, OUT_DIR, MRI_HARMONIZE_COLS, BASE_DIR
 
 
 def calibration_plot(X_imp, y_event, y_duration, predict_proba_fn,
