@@ -327,7 +327,7 @@ def compute_slopes_cutoff(df_all, surv_labels, features, min_visits=2):
 
     
 def longitudinal_fill(df_all, features, window_yr=1.0):
-        """
+    """
     Tier-1 imputation: fill missing values using the nearest longitudinal
     observation within a ±window_yr time window for each subject.
 
@@ -359,7 +359,7 @@ def longitudinal_fill(df_all, features, window_yr=1.0):
     return df_out
 
 def mice_impute(X_df, max_iter=10, seed=RANDOM_SEED):
-        """
+    """
     Tier-2 imputation: apply MICE (Multiple Imputation by Chained Equations)
     via sklearn's IterativeImputer to fill any remaining NaNs after longitudinal fill.
 
@@ -376,7 +376,7 @@ def mice_impute(X_df, max_iter=10, seed=RANDOM_SEED):
     return pd.DataFrame(arr, columns=X_df.columns, index=X_df.index)
 
 def assemble_cohort(df_baseline, surv_labels, slopes_df, core_features, slope_all_cols):
-        """
+    """
     Join baseline features, survival labels, and longitudinal slopes into a
     single modeling-ready DataFrame for one cohort.
 
@@ -412,7 +412,7 @@ def assemble_cohort(df_baseline, surv_labels, slopes_df, core_features, slope_al
     )
 
 def add_slope_concordance(X):
-     """
+    """
     Add a binary concordance feature indicating simultaneous cognitive and
     structural decline — both MMSE slope and Hippocampus slope are negative.
 
@@ -434,7 +434,7 @@ def add_slope_concordance(X):
     return X
 
 def get_domain_features(feature_names):
-     """
+    """
     Partition the full feature list into domain-specific subsets for
     modality-separated modeling experiments.
 
@@ -475,7 +475,7 @@ def get_domain_features(feature_names):
 
 
 def test_tqdm():
-        """
+    """
     Smoke test to verify tqdm progress bars render correctly in the current
     environment (Colab notebook vs local terminal).
 
