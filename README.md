@@ -217,8 +217,8 @@ ComBat batch effect correction is applied to MRI volumetric features (Hippocampu
 
 | Model | Cohort | C-index |
 |-------|--------|---------|
-| Weighted Ensemble | MCI → Dementia | 0.8957 |
-| Domain Ensemble | MCI → Dementia | 0.8957 |
+| Weighted Ensemble | MCI → Dementia | 0.8939 |
+| Domain Ensemble | MCI → Dementia | 0.8939 |
 | DeepSurv | MCI → Dementia | 0.8478 |
 | LightGBM Survival | MCI → Dementia | 0.8033 |
 | DeepSurv | CN → Decline | 0.7000 |
