@@ -35,6 +35,21 @@ print(f'LightGBM device: {LGB_DEVICE}')
 
 
 def save_checkpoint(name, obj):
+        """
+    Serialize and save a Python object to disk as a .pkl file in CHECKPOINT_DIR.
+
+    Used to persist trained models and results between pipeline runs, allowing
+    the pipeline to skip expensive retraining steps when RETRAIN=False.
+
+    Args:
+        name (str): Checkpoint identifier used as the filename stem
+            (e.g. 'lgb_model_mci' saves as 'lgb_model_mci.pkl').
+        obj (any): Any pickle-serializable Python object (e.g. trained model,
+            results dict, numpy array).
+
+    Returns:
+        None. Prints the saved path on success.
+    """
     path = CHECKPOINT_DIR / f'{name}.pkl'
     with open(path, 'wb') as f:
         pickle.dump(obj, f)
@@ -42,6 +57,20 @@ def save_checkpoint(name, obj):
 
 
 def load_checkpoint(name):
+        """
+    Load a previously saved .pkl checkpoint from CHECKPOINT_DIR if it exists.
+
+    Returns None silently if the checkpoint file is not found, allowing the
+    caller to fall back to retraining when a checkpoint is missing.
+
+    Args:
+        name (str): Checkpoint identifier matching the stem used in
+            save_checkpoint (e.g. 'lgb_model_mci' loads 'lgb_model_mci.pkl').
+
+    Returns:
+        any: The deserialized Python object if the checkpoint exists,
+            or None if the file is not found.
+    """
     path = CHECKPOINT_DIR / f'{name}.pkl'
     if path.exists():
         with open(path, 'rb') as f:
@@ -70,11 +99,25 @@ def cv_cindex(X, y_event, y_duration, predict_fn, n_folds=N_FOLDS, seed=RANDOM_S
 
 
 def binary_horizon_dataset(y_event, y_duration, horizon_yr):
-    '''
-    Build binary labels for fixed-horizon prediction.
-    Excludes censored subjects who were followed for < horizon years
-    (their outcome is unknown).
-    '''
+    """
+    Construct binary classification labels for fixed-horizon survival prediction.
+
+    Subjects are assigned label 1 if they experienced the event within
+    horizon_yr, label 0 if they were event-free at or beyond horizon_yr.
+    Censored subjects followed for less than horizon_yr are excluded because
+    their outcome is unknown — including them would introduce label noise.
+
+    Args:
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        horizon_yr (float): Prediction horizon in years (e.g. 3.0 or 5.0).
+
+    Returns:
+        tuple:
+            label (np.ndarray[int]): Binary labels (0 or 1) for included subjects.
+            include (np.ndarray[bool]): Boolean mask selecting subjects with
+                determinable outcomes at the given horizon.
+    """
     label  = np.full(len(y_event), -1, dtype=int)
     is_ev  = y_event == 1
     is_cen = y_event == 0
@@ -86,10 +129,27 @@ def binary_horizon_dataset(y_event, y_duration, horizon_yr):
 
 
 def horizon_aucs(X_imp, y_event, y_duration, train_predict_fn, horizons=HORIZONS):
-    '''
-    AUC at each fixed horizon using stratified CV.
-    train_predict_fn(X_tr, y_bin_tr, X_va) -> probs
-    '''
+    """
+    Compute time-dependent AUC at each fixed prediction horizon using
+    stratified cross-validation.
+
+    For each horizon, binary labels are constructed via binary_horizon_dataset,
+    then N_FOLDS-fold stratified CV is run using the provided training function.
+    Horizons with fewer than 15 events are skipped to ensure stable AUC estimates.
+
+    Args:
+        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        train_predict_fn (callable): Function with signature
+            (X_train, y_bin_train, X_val) -> predicted_probabilities.
+        horizons (list[int]): Prediction horizons in years to evaluate.
+            Default HORIZONS (e.g. [3, 5]).
+
+    Returns:
+        dict: Maps each horizon (int) to a tuple (mean_auc, std_auc) across folds.
+            Horizons with too few events are omitted from the dict.
+    """
     aucs = {}
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_SEED)
     for h in horizons:
@@ -149,6 +209,29 @@ def build_csf_imputer(df_baseline, target_col='ABETA', seed=RANDOM_SEED):
 
 def lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label,
                      n_trials=30, seed=RANDOM_SEED):
+                         """
+    Train and tune a LightGBM survival model using a log-risk regression target,
+    with Optuna Bayesian hyperparameter optimization and stratified cross-validation.
+
+    The survival target is constructed as -log1p(duration), with event subjects
+    upweighted 3× to compensate for censoring imbalance. The best hyperparameters
+    found by Optuna are used to refit a final model on the full dataset.
+
+    Args:
+        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        feature_names (list[str]): Feature column names for LGB Dataset construction.
+        label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
+        n_trials (int): Number of Optuna hyperparameter search trials. Default 30.
+        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+
+    Returns:
+        tuple:
+            c (float): C-index of the final model evaluated on the full training set.
+            imp (pd.Series): Feature importances by gain, sorted descending.
+            final_model (lgb.Booster): Final LightGBM model fitted on all data.
+    """
     risk_target = -np.log1p(y_duration)
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
 
@@ -200,6 +283,29 @@ def lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label,
 
 def run_deepsurv(X_imp, y_event, y_duration, label,
                   n_trials=20, seed=RANDOM_SEED):
+                      """
+    Train and tune a DeepSurv (neural Cox PH) model using pycox and torchtuples,
+    with Optuna hyperparameter optimization over architecture and training params.
+
+    Features are standardized before training. The final model is refit on the
+    full dataset using an 80/20 temporal split for early stopping. Baseline
+    hazards are computed after fitting to enable survival function prediction.
+
+    Args:
+        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
+        n_trials (int): Number of Optuna hyperparameter search trials. Default 20.
+        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+
+    Returns:
+        tuple:
+            best_value (float): Best time-dependent C-index (C-td) from Optuna CV.
+            final (PycoxCoxPH): Final DeepSurv model fitted on full data.
+            scaler (StandardScaler): Fitted scaler — must be used to transform
+                any new data before passing to this model.
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
     scaler = StandardScaler()
@@ -255,6 +361,27 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
 
 
 def calc_deepsurv_c(model, scaler, X, y_event, y_duration):
+    """
+    Evaluate a fitted DeepSurv model by computing the time-dependent C-index
+    (C-td) on a given dataset.
+
+    Scales features using the provided scaler, generates survival function
+    predictions, and evaluates discrimination via EvalSurv.
+
+    Args:
+        model (PycoxCoxPH): Fitted DeepSurv model with baseline hazards computed.
+        scaler (StandardScaler): The scaler fitted during model training —
+            must match the one returned by run_deepsurv.
+        X (pd.DataFrame): Feature matrix to evaluate on (NaN-free).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+
+    Returns:
+        tuple:
+            c_td (float): Time-dependent concordance index on the provided dataset.
+            surv (pd.DataFrame): Predicted survival functions, shape
+                (n_timepoints, n_subjects).
+    """
     X_scaled = scaler.transform(X.values).astype(np.float32)
     surv = model.predict_surv_df(X_scaled)
     ev = EvalSurv(surv,
@@ -316,9 +443,23 @@ def domain_ensemble(X_mci, y_event, y_duration, domains_dict,
 
 
 def lgb_factory(X_tr, y_ev, y_dur):
-    '''
-    Define LightGBM base model factory
-    '''
+    """
+    Factory function that returns a LightGBM training closure pre-configured
+    with the given hyperparameters, for use inside cv_cindex or horizon_aucs.
+
+    The returned function trains a LGB model on (X_train, y_event, y_duration)
+    and returns risk scores on X_val, compatible with the cv_cindex interface.
+
+    Args:
+        params (dict): LightGBM hyperparameters to pass to lgb.train(),
+            e.g. num_leaves, learning_rate, feature_fraction.
+        feature_names (list[str]): Feature column names for the LGB Dataset.
+        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+
+    Returns:
+        callable: A function with signature
+            (X_train, y_ev_tr, y_dur_tr, X_val) -> risk_scores (np.ndarray).
+    """
     risk = -np.log1p(y_dur)
     w = np.where(y_ev == 1, 3.0, 1.0)
     params = dict(objective='regression_l1', n_estimators=200, learning_rate=0.05,
