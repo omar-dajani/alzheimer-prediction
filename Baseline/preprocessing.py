@@ -12,14 +12,7 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from tqdm.notebook import tqdm
 import time
-
-
-MRI_HARMONIZE_COLS = ['Hippocampus', 'Entorhinal', 'Ventricles', 'Fusiform', 'MidTemp', 'WholeBrain'] # Features that need harmonization
-RANDOM_SEED = 42
-BASE_DIR       = Path(__file__).parent   # resolves to Baseline/ regardless of CWD
-FIG_DIR        = BASE_DIR / 'figures'
-
-
+from config import RANDOM_SEED, N_FOLDS, HORIZONS, FIG_DIR, CHECKPOINT_DIR, OUT_DIR, MRI_HARMONIZE_COLS, BASE_DIR
 
 
 def classify_reverters(df_all, from_state='MCI', to_state='CN'):
