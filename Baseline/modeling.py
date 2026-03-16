@@ -392,22 +392,46 @@ def calc_deepsurv_c(model, scaler, X, y_event, y_duration):
     return c_td, surv
 
 
-def weighted_ensemble(risk_score_dict, weights_dict, y_event, y_duration, label):
+def weighted_ensemble(risk_score_dict, weights_dict, y_event, y_duration, label, n_trials=50):
     '''
-    Combine risk scores from multiple models using C-index weights.
+    Combine risk scores from multiple models using Optuna-optimized weights.
     risk_score_dict: {model_name: array of risk scores}
-    weights_dict:    {model_name: weight (e.g., CV C-index)}
+    weights_dict:    {model_name: initial weight (e.g., CV C-index)} (unused for optimization)
     '''
-    total_weight = sum(weights_dict.values())
-    ensemble_score = np.zeros(len(y_event))
+    model_names = list(risk_score_dict.keys())
+
+    # Normalize each model's scores to [0,1] once
+    normed = {}
     for name, scores in risk_score_dict.items():
-        w = weights_dict.get(name, 1.0) / total_weight
-        # Normalize each model's scores to [0,1] before averaging
         s_min, s_max = scores.min(), scores.max()
-        norm = (scores - s_min) / (s_max - s_min + 1e-9)
-        ensemble_score += w * norm
+        normed[name] = (scores - s_min) / (s_max - s_min + 1e-9)
+
+    def objective(trial):
+        # Sample a weight for each model, then normalize to sum to 1
+        raw_weights = [trial.suggest_float(f'w_{name}', 0.2, 0.8) for name in model_names]
+        total = sum(raw_weights) + 1e-9
+        ensemble_score = sum(
+            (w / total) * normed[name]
+            for w, name in zip(raw_weights, model_names)
+        )
+        return concordance_index(y_duration, -ensemble_score, y_event)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    # Reconstruct best ensemble
+    best = study.best_params
+    raw_weights = [best[f'w_{name}'] for name in model_names]
+    total = sum(raw_weights) + 1e-9
+    ensemble_score = sum(
+        (w / total) * normed[name]
+        for w, name in zip(raw_weights, model_names)
+    )
+
     c = concordance_index(y_duration, -ensemble_score, y_event)
-    print(f'  [{label}] Weighted ensemble C-index: {c:.4f}')
+    best_weights = {name: w / total for name, w in zip(model_names, raw_weights)}
+    print(f'  [{label}] Optimized ensemble C-index: {c:.4f} | weights: {best_weights}')
     return c, ensemble_score
 
 

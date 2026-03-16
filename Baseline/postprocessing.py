@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import lightgbm as lgb
 import pandas as pd
-from Baseline.modeling import binary_horizon_dataset
+from modeling import binary_horizon_dataset
 from config import RANDOM_SEED, N_FOLDS, HORIZONS, FIG_DIR, CHECKPOINT_DIR, OUT_DIR, MRI_HARMONIZE_COLS, BASE_DIR
 
 
@@ -83,7 +83,7 @@ def lgb_horizon_proba(X, horizon, y_ev, y_dur, X_train, y_ev_tr, y_dur_tr):
     return m.predict_proba(X.iloc[include_te])[:,1]
 
 def km_risk_quartile(risk_scores, y_event, y_duration, model_name, cohort):
-  """
+    """
     Plot Kaplan-Meier survival curves stratified by predicted risk quartile.
 
     Subjects are divided into four equal-sized quartiles (Q1=lowest risk,
