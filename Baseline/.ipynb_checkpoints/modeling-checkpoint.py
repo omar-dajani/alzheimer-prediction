@@ -1,5 +1,11 @@
-# LightGBM imports
 from pathlib import Path
+import pickle
+import numpy as np
+import pandas as pd
+import optuna
+from tqdm.notebook import tqdm
+
+# LightGBM imports
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, mean_squared_error, r2_score
 from lifelines.utils import concordance_index
@@ -11,16 +17,39 @@ import torchtuples as tt
 from pycox.models import CoxPH as PycoxCoxPH
 from pycox.evaluation import EvalSurv
 from sklearn.preprocessing import StandardScaler
+from concordance import concordance_td
 
 # Ensemble imports
 from sklearn.linear_model import RidgeCV
+from config import RANDOM_SEED, N_FOLDS, HORIZONS, FIG_DIR, CHECKPOINT_DIR, OUT_DIR, MRI_HARMONIZE_COLS, BASE_DIR
 
-
-CHECKPOINT_DIR = Path.cwd() / 'checkpoints'
-RANDOM_SEED = 42
+# ── GPU detection ─────────────────────────────────────────────────────────────
+try:
+    import lightgbm as lgb_test
+    _test_params = {'device': 'gpu', 'verbose': -1, 'n_estimators': 1}
+    lgb_test.LGBMRegressor(**_test_params).fit([[1]], [1])
+    LGB_DEVICE = 'gpu'
+except Exception:
+    LGB_DEVICE = 'cpu'
+print(f'LightGBM device: {LGB_DEVICE}')
 
 
 def save_checkpoint(name, obj):
+    """
+    Serialize and save a Python object to disk as a .pkl file in CHECKPOINT_DIR.
+
+    Used to persist trained models and results between pipeline runs, allowing
+    the pipeline to skip expensive retraining steps when RETRAIN=False.
+
+    Args:
+        name (str): Checkpoint identifier used as the filename stem
+            (e.g. 'lgb_model_mci' saves as 'lgb_model_mci.pkl').
+        obj (any): Any pickle-serializable Python object (e.g. trained model,
+            results dict, numpy array).
+
+    Returns:
+        None. Prints the saved path on success.
+    """
     path = CHECKPOINT_DIR / f'{name}.pkl'
     with open(path, 'wb') as f:
         pickle.dump(obj, f)
@@ -28,6 +57,20 @@ def save_checkpoint(name, obj):
 
 
 def load_checkpoint(name):
+    """
+    Load a previously saved .pkl checkpoint from CHECKPOINT_DIR if it exists.
+
+    Returns None silently if the checkpoint file is not found, allowing the
+    caller to fall back to retraining when a checkpoint is missing.
+
+    Args:
+        name (str): Checkpoint identifier matching the stem used in
+            save_checkpoint (e.g. 'lgb_model_mci' loads 'lgb_model_mci.pkl').
+
+    Returns:
+        any: The deserialized Python object if the checkpoint exists,
+            or None if the file is not found.
+    """
     path = CHECKPOINT_DIR / f'{name}.pkl'
     if path.exists():
         with open(path, 'rb') as f:
@@ -56,11 +99,25 @@ def cv_cindex(X, y_event, y_duration, predict_fn, n_folds=N_FOLDS, seed=RANDOM_S
 
 
 def binary_horizon_dataset(y_event, y_duration, horizon_yr):
-    '''
-    Build binary labels for fixed-horizon prediction.
-    Excludes censored subjects who were followed for < horizon years
-    (their outcome is unknown).
-    '''
+    """
+    Construct binary classification labels for fixed-horizon survival prediction.
+
+    Subjects are assigned label 1 if they experienced the event within
+    horizon_yr, label 0 if they were event-free at or beyond horizon_yr.
+    Censored subjects followed for less than horizon_yr are excluded because
+    their outcome is unknown — including them would introduce label noise.
+
+    Args:
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        horizon_yr (float): Prediction horizon in years (e.g. 3.0 or 5.0).
+
+    Returns:
+        tuple:
+            label (np.ndarray[int]): Binary labels (0 or 1) for included subjects.
+            include (np.ndarray[bool]): Boolean mask selecting subjects with
+                determinable outcomes at the given horizon.
+    """
     label  = np.full(len(y_event), -1, dtype=int)
     is_ev  = y_event == 1
     is_cen = y_event == 0
@@ -72,10 +129,27 @@ def binary_horizon_dataset(y_event, y_duration, horizon_yr):
 
 
 def horizon_aucs(X_imp, y_event, y_duration, train_predict_fn, horizons=HORIZONS):
-    '''
-    AUC at each fixed horizon using stratified CV.
-    train_predict_fn(X_tr, y_bin_tr, X_va) -> probs
-    '''
+    """
+    Compute time-dependent AUC at each fixed prediction horizon using
+    stratified cross-validation.
+
+    For each horizon, binary labels are constructed via binary_horizon_dataset,
+    then N_FOLDS-fold stratified CV is run using the provided training function.
+    Horizons with fewer than 15 events are skipped to ensure stable AUC estimates.
+
+    Args:
+        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        train_predict_fn (callable): Function with signature
+            (X_train, y_bin_train, X_val) -> predicted_probabilities.
+        horizons (list[int]): Prediction horizons in years to evaluate.
+            Default HORIZONS (e.g. [3, 5]).
+
+    Returns:
+        dict: Maps each horizon (int) to a tuple (mean_auc, std_auc) across folds.
+            Horizons with too few events are omitted from the dict.
+    """
     aucs = {}
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_SEED)
     for h in horizons:
@@ -135,13 +209,36 @@ def build_csf_imputer(df_baseline, target_col='ABETA', seed=RANDOM_SEED):
 
 def lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label,
                      n_trials=30, seed=RANDOM_SEED):
+    """
+    Train and tune a LightGBM survival model using a log-risk regression target,
+    with Optuna Bayesian hyperparameter optimization and stratified cross-validation.
+
+    The survival target is constructed as -log1p(duration), with event subjects
+    upweighted 3× to compensate for censoring imbalance. The best hyperparameters
+    found by Optuna are used to refit a final model on the full dataset.
+
+    Args:
+        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        feature_names (list[str]): Feature column names for LGB Dataset construction.
+        label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
+        n_trials (int): Number of Optuna hyperparameter search trials. Default 30.
+        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+
+    Returns:
+        tuple:
+            c (float): C-index of the final model evaluated on the full training set.
+            imp (pd.Series): Feature importances by gain, sorted descending.
+            final_model (lgb.Booster): Final LightGBM model fitted on all data.
+    """
     risk_target = -np.log1p(y_duration)
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
 
     def objective(trial):
         params = dict(
             objective='regression_l1',
-            device='gpu',
+            device=LGB_DEVICE,
             learning_rate=trial.suggest_float('lr', 0.02, 0.1, log=True),
             num_leaves=trial.suggest_int('num_leaves', 31, 127),
             min_child_samples=trial.suggest_int('min_child_samples', 10, 50),
@@ -183,15 +280,136 @@ def lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label,
     c = concordance_index(y_duration, -pred, y_event)
     return c, imp, final_model
 
+def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
+                     n_trials=30, seed=RANDOM_SEED):
+    """
+    Train and tune a scikit-survival GradientBoostingSurvivalAnalysis model
+    using Optuna Bayesian hyperparameter optimization and stratified
+    cross-validation.
+
+    Concordance is evaluated using Antolini's time-dependent C-index via
+    pycox's EvalSurv, which requires the full survival curve S(t|x) rather
+    than a scalar risk score. The survival matrix is built from sksurv's
+    predict_survival_function() output and passed to EvalSurv with a KM
+    censoring estimator.
+
+    Args:
+        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring (e.g. in years).
+        feature_names (list[str]): Feature column names (used for importance).
+        label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
+        n_trials (int): Number of Optuna hyperparameter search trials. Default 30.
+        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+
+    Returns:
+        tuple:
+            c (float): Antolini's C-index of the final model on the full
+                training set.
+            imp (pd.Series): Feature importances (mean decrease in impurity),
+                sorted descending.
+            final_model (GradientBoostingSurvivalAnalysis): Final model fitted
+                on all data.
+    """
+    from sksurv.ensemble import GradientBoostingSurvivalAnalysis
+    from pycox.evaluation import EvalSurv
+
+    def get_antolini_c(surv_funcs, durations, events):
+        """Build a pycox EvalSurv object and return Antolini's C-index."""
+        time_grid   = surv_funcs[0].x
+        surv_matrix = np.row_stack([fn(time_grid) for fn in surv_funcs]).T
+        # surv_matrix shape: (n_times, n_subjects) — pycox convention
+        ev = EvalSurv(
+            surv=pd.DataFrame(surv_matrix, index=time_grid),
+            durations=durations,
+            events=events
+        )
+        return ev.concordance_td()
+
+    y_struct = np.array(
+        [(bool(e), t) for e, t in zip(y_event, y_duration)],
+        dtype=[('event', bool), ('time', float)]
+    )
+
+    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
+
+    def objective(trial):
+        params = dict(
+            loss='coxph',
+            learning_rate=trial.suggest_float('learning_rate', 0.02, 0.15, log=True),
+            n_estimators=trial.suggest_int('n_estimators', 100, 600, step=50),
+            max_depth=trial.suggest_int('max_depth', 2, 5),
+            min_samples_split=trial.suggest_int('min_samples_split', 2, 20),
+            min_samples_leaf=trial.suggest_int('min_samples_leaf', 1, 20),
+            max_features=trial.suggest_float('max_features', 0.5, 1.0),
+            subsample=trial.suggest_float('subsample', 0.6, 1.0),
+            random_state=seed,
+        )
+
+        cs = []
+        for tr, va in skf.split(X_imp, y_event):
+            model = GradientBoostingSurvivalAnalysis(**params)
+            model.fit(X_imp.iloc[tr], y_struct[tr])
+
+            surv_funcs = model.predict_survival_function(X_imp.iloc[va])
+            c_stat = get_antolini_c(surv_funcs, y_duration[va], y_event[va])
+            cs.append(c_stat)
+
+        return np.mean(cs)
+
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    best = study.best_params
+    print(f'  [{label}] GBSA best Antolini-C: {study.best_value:.4f} | params: {best}')
+
+    # Refit final model on all data
+    final_model = GradientBoostingSurvivalAnalysis(
+        loss='coxph',
+        random_state=seed,
+        **best
+    )
+    final_model.fit(X_imp, y_struct)
+
+    imp = pd.Series(
+        final_model.feature_importances_,
+        index=feature_names
+    ).sort_values(ascending=False)
+
+    surv_funcs_all = final_model.predict_survival_function(X_imp)
+    c = get_antolini_c(surv_funcs_all, y_duration, y_event)
+
+    return c, imp, final_model
 
 def run_deepsurv(X_imp, y_event, y_duration, label,
                   n_trials=20, seed=RANDOM_SEED):
+    """
+    Train and tune a DeepSurv (neural Cox PH) model using pycox and torchtuples,
+    with Optuna hyperparameter optimization over architecture and training params.
+
+    Features are standardized before training. The final model is refit on the
+    full dataset using an 80/20 temporal split for early stopping. Baseline
+    hazards are computed after fitting to enable survival function prediction.
+
+    Args:
+        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
+        n_trials (int): Number of Optuna hyperparameter search trials. Default 20.
+        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+
+    Returns:
+        tuple:
+            best_value (float): Best time-dependent C-index (C-td) from Optuna CV.
+            final (PycoxCoxPH): Final DeepSurv model fitted on full data.
+            scaler (StandardScaler): Fitted scaler — must be used to transform
+                any new data before passing to this model.
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
-
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_imp.values).astype(np.float32)
-
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
 
     def objective(trial):
@@ -225,32 +443,133 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
     best = study.best_params
     print(f'  [{label}] DeepSurv best C-td: {study.best_value:.4f} | {best}')
 
-    # Refit final model on all data
+    # Refit final model with explicit val split for early stopping
     net = tt.practical.MLPVanilla(
         X_scaled.shape[1], best['hidden'], 1,
         batch_norm=True, dropout=best['dropout'])
     final = PycoxCoxPH(net, tt.optim.Adam(best['lr']))
     y_all = (y_duration.astype(np.float32), y_event.astype(np.float32))
-    final.fit(X_scaled, y_all, best['batch'], 100, verbose=False)
+    n_val = int(len(X_scaled) * 0.2)
+    X_tr_f, X_va_f = X_scaled[:-n_val], X_scaled[-n_val:]
+    y_tr_f = (y_all[0][:-n_val], y_all[1][:-n_val])
+    y_va_f = (y_all[0][-n_val:], y_all[1][-n_val:])
+    final.fit(X_tr_f, y_tr_f, best['batch'], 200, verbose=False,
+              val_data=(X_va_f, y_va_f),
+              callbacks=[tt.callbacks.EarlyStopping(patience=15)])
     final.compute_baseline_hazards()
     return study.best_value, final, scaler
 
-def weighted_ensemble(risk_score_dict, weights_dict, y_event, y_duration, label):
+
+def calc_deepsurv_c(model, scaler, X, y_event, y_duration):
+    """
+    Evaluate a fitted DeepSurv model by computing the time-dependent C-index
+    (C-td) on a given dataset.
+
+    Updated to use an IPCW weighted version (Uno et al.) of the time-dependent
+    C-index (Antolini et al.)
+
+    Args:
+        model (PycoxCoxPH): Fitted DeepSurv model with baseline hazards computed.
+        scaler (StandardScaler): The scaler fitted during model training —
+            must match the one returned by run_deepsurv.
+        X (pd.DataFrame): Feature matrix to evaluate on (NaN-free).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+
+    Returns:
+        tuple:
+            c_td (float): Time-dependent concordance index on the provided dataset.
+            surv (pd.DataFrame): Predicted survival functions, shape
+                (n_timepoints, n_subjects).
+    """
+    X_scaled = scaler.transform(X.values).astype(np.float32)
+    surv = model.predict_surv_df(X_scaled)
+    
+    # Extract arrays from the surv DataFrame
+    times = surv.index.values.astype(np.float64)
+    surv_array = surv.values.astype(np.float64)  # shape (n_times, n)
+    durations = y_duration.astype(np.float64)
+    events = y_event.astype(np.int32)
+    
+    # Build surv_idx
+    surv_idx = np.searchsorted(times, durations)
+    surv_idx = np.clip(surv_idx, 0, len(times) - 1)
+    
+    c_td = concordance_td(durations, events, surv_array, surv_idx, method='adj_antolini', ipcw=True)
+    print(f'  DeepSurv final C-td: {c_td:.4f}')
+    return c_td, surv
+
+def calc_gbsa_c(model, X, y_event, y_duration):
+    """
+    Evaluate a fitted GradientBoostingSurvivalAnalysis model by computing
+    the time-dependent C-index (C-td) on a given dataset.
+
+    The C-td is based on Antolini et al. with an additional IPCW weight based
+    on Uno et al.
+
+    Args:
+        model (GradientBoostingSurvivalAnalysis): Fitted sksurv GBSA model.
+        X (pd.DataFrame): Feature matrix to evaluate on (NaN-free).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+
+    Returns:
+        tuple:
+            c_td (float): Time-dependent concordance index on the provided dataset.
+            surv (pd.DataFrame): Predicted survival functions, shape
+                (n_timepoints, n_subjects).
+    """
+    surv_funcs  = model.predict_survival_function(X)
+    time_grid   = surv_funcs[0].x
+    surv_matrix = np.row_stack([fn(time_grid) for fn in surv_funcs]).T
+    surv        = pd.DataFrame(surv_matrix, index=time_grid)
+    surv_idx = np.searchsorted(time_grid, y_duration)
+    surv_idx = np.clip(surv_idx, 0, len(time_grid) - 1)
+
+    c_td = concordance_td(y_duration, y_event, surv, surv_idx, method='adj_antolini',ipcw=True)
+    print(f'  GBSA final C-td: {c_td:.4f}')
+    return c_td, surv
+
+def weighted_ensemble(risk_score_dict, weights_dict, y_event, y_duration, label, n_trials=50):
     '''
-    Combine risk scores from multiple models using C-index weights.
+    Combine risk scores from multiple models using Optuna-optimized weights.
     risk_score_dict: {model_name: array of risk scores}
-    weights_dict:    {model_name: weight (e.g., CV C-index)}
+    weights_dict:    {model_name: initial weight (e.g., CV C-index)} (unused for optimization)
     '''
-    total_weight = sum(weights_dict.values())
-    ensemble_score = np.zeros(len(y_event))
+    model_names = list(risk_score_dict.keys())
+
+    # Normalize each model's scores to [0,1] once
+    normed = {}
     for name, scores in risk_score_dict.items():
-        w = weights_dict.get(name, 1.0) / total_weight
-        # Normalize each model's scores to [0,1] before averaging
         s_min, s_max = scores.min(), scores.max()
-        norm = (scores - s_min) / (s_max - s_min + 1e-9)
-        ensemble_score += w * norm
+        normed[name] = (scores - s_min) / (s_max - s_min + 1e-9)
+
+    def objective(trial):
+        # Sample a weight for each model, then normalize to sum to 1
+        raw_weights = [trial.suggest_float(f'w_{name}', 0.2, 0.8) for name in model_names]
+        total = sum(raw_weights) + 1e-9
+        ensemble_score = sum(
+            (w / total) * normed[name]
+            for w, name in zip(raw_weights, model_names)
+        )
+        return concordance_index(y_duration, -ensemble_score, y_event)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    # Reconstruct best ensemble
+    best = study.best_params
+    raw_weights = [best[f'w_{name}'] for name in model_names]
+    total = sum(raw_weights) + 1e-9
+    ensemble_score = sum(
+        (w / total) * normed[name]
+        for w, name in zip(raw_weights, model_names)
+    )
+
     c = concordance_index(y_duration, -ensemble_score, y_event)
-    print(f'  [{label}] Weighted ensemble C-index: {c:.4f}')
+    best_weights = {name: w / total for name, w in zip(model_names, raw_weights)}
+    print(f'  [{label}] Optimized ensemble C-index: {c:.4f} | weights: {best_weights}')
     return c, ensemble_score
 
 
@@ -286,9 +605,23 @@ def domain_ensemble(X_mci, y_event, y_duration, domains_dict,
 
 
 def lgb_factory(X_tr, y_ev, y_dur):
-    '''
-    Define LightGBM base model factory
-    '''
+    """
+    Factory function that returns a LightGBM training closure pre-configured
+    with the given hyperparameters, for use inside cv_cindex or horizon_aucs.
+
+    The returned function trains a LGB model on (X_train, y_event, y_duration)
+    and returns risk scores on X_val, compatible with the cv_cindex interface.
+
+    Args:
+        params (dict): LightGBM hyperparameters to pass to lgb.train(),
+            e.g. num_leaves, learning_rate, feature_fraction.
+        feature_names (list[str]): Feature column names for the LGB Dataset.
+        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+
+    Returns:
+        callable: A function with signature
+            (X_train, y_ev_tr, y_dur_tr, X_val) -> risk_scores (np.ndarray).
+    """
     risk = -np.log1p(y_dur)
     w = np.where(y_ev == 1, 3.0, 1.0)
     params = dict(objective='regression_l1', n_estimators=200, learning_rate=0.05,

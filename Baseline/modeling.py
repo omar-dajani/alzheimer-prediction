@@ -17,10 +17,10 @@ import torchtuples as tt
 from pycox.models import CoxPH as PycoxCoxPH
 from pycox.evaluation import EvalSurv
 from sklearn.preprocessing import StandardScaler
+from concordance import concordance_td
 
 # Ensemble imports
 from sklearn.linear_model import RidgeCV
-
 from config import RANDOM_SEED, N_FOLDS, HORIZONS, FIG_DIR, CHECKPOINT_DIR, OUT_DIR, MRI_HARMONIZE_COLS, BASE_DIR
 
 # ── GPU detection ─────────────────────────────────────────────────────────────
@@ -280,6 +280,106 @@ def lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label,
     c = concordance_index(y_duration, -pred, y_event)
     return c, imp, final_model
 
+def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
+                     n_trials=30, seed=RANDOM_SEED):
+    """
+    Train and tune a scikit-survival GradientBoostingSurvivalAnalysis model
+    using Optuna Bayesian hyperparameter optimization and stratified
+    cross-validation.
+
+    Concordance is evaluated using Antolini's time-dependent C-index via
+    pycox's EvalSurv, which requires the full survival curve S(t|x) rather
+    than a scalar risk score. The survival matrix is built from sksurv's
+    predict_survival_function() output and passed to EvalSurv with a KM
+    censoring estimator.
+
+    Args:
+        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring (e.g. in years).
+        feature_names (list[str]): Feature column names (used for importance).
+        label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
+        n_trials (int): Number of Optuna hyperparameter search trials. Default 30.
+        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+
+    Returns:
+        tuple:
+            c (float): Antolini's C-index of the final model on the full
+                training set.
+            imp (pd.Series): Feature importances (mean decrease in impurity),
+                sorted descending.
+            final_model (GradientBoostingSurvivalAnalysis): Final model fitted
+                on all data.
+    """
+    from sksurv.ensemble import GradientBoostingSurvivalAnalysis
+    from pycox.evaluation import EvalSurv
+
+    def get_antolini_c(surv_funcs, durations, events):
+        """Build a pycox EvalSurv object and return Antolini's C-index."""
+        time_grid   = surv_funcs[0].x
+        surv_matrix = np.row_stack([fn(time_grid) for fn in surv_funcs]).T
+        # surv_matrix shape: (n_times, n_subjects) — pycox convention
+        ev = EvalSurv(
+            surv=pd.DataFrame(surv_matrix, index=time_grid),
+            durations=durations,
+            events=events
+        )
+        return ev.concordance_td()
+
+    y_struct = np.array(
+        [(bool(e), t) for e, t in zip(y_event, y_duration)],
+        dtype=[('event', bool), ('time', float)]
+    )
+
+    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
+
+    def objective(trial):
+        params = dict(
+            loss='coxph',
+            learning_rate=trial.suggest_float('learning_rate', 0.02, 0.15, log=True),
+            n_estimators=trial.suggest_int('n_estimators', 100, 600, step=50),
+            max_depth=trial.suggest_int('max_depth', 2, 5),
+            min_samples_split=trial.suggest_int('min_samples_split', 2, 20),
+            min_samples_leaf=trial.suggest_int('min_samples_leaf', 1, 20),
+            max_features=trial.suggest_float('max_features', 0.5, 1.0),
+            subsample=trial.suggest_float('subsample', 0.6, 1.0),
+            random_state=seed,
+        )
+
+        cs = []
+        for tr, va in skf.split(X_imp, y_event):
+            model = GradientBoostingSurvivalAnalysis(**params)
+            model.fit(X_imp.iloc[tr], y_struct[tr])
+
+            surv_funcs = model.predict_survival_function(X_imp.iloc[va])
+            c_stat = get_antolini_c(surv_funcs, y_duration[va], y_event[va])
+            cs.append(c_stat)
+
+        return np.mean(cs)
+
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    best = study.best_params
+    print(f'  [{label}] GBSA best Antolini-C: {study.best_value:.4f} | params: {best}')
+
+    # Refit final model on all data
+    final_model = GradientBoostingSurvivalAnalysis(
+        loss='coxph',
+        random_state=seed,
+        **best
+    )
+    final_model.fit(X_imp, y_struct)
+
+    imp = pd.Series(
+        final_model.feature_importances_,
+        index=feature_names
+    ).sort_values(ascending=False)
+
+    surv_funcs_all = final_model.predict_survival_function(X_imp)
+    c = get_antolini_c(surv_funcs_all, y_duration, y_event)
+
+    return c, imp, final_model
 
 def run_deepsurv(X_imp, y_event, y_duration, label,
                   n_trials=20, seed=RANDOM_SEED):
@@ -365,8 +465,8 @@ def calc_deepsurv_c(model, scaler, X, y_event, y_duration):
     Evaluate a fitted DeepSurv model by computing the time-dependent C-index
     (C-td) on a given dataset.
 
-    Scales features using the provided scaler, generates survival function
-    predictions, and evaluates discrimination via EvalSurv.
+    Updated to use an IPCW weighted version (Uno et al.) of the time-dependent
+    C-index (Antolini et al.)
 
     Args:
         model (PycoxCoxPH): Fitted DeepSurv model with baseline hazards computed.
@@ -384,13 +484,51 @@ def calc_deepsurv_c(model, scaler, X, y_event, y_duration):
     """
     X_scaled = scaler.transform(X.values).astype(np.float32)
     surv = model.predict_surv_df(X_scaled)
-    ev = EvalSurv(surv,
-                  y_duration.astype(np.float64),
-                  y_event.astype(bool))
-    c_td = ev.concordance_td()
+    
+    # Extract arrays from the surv DataFrame
+    times = surv.index.values.astype(np.float64)
+    surv_array = surv.values.astype(np.float64)  # shape (n_times, n)
+    durations = y_duration.astype(np.float64)
+    events = y_event.astype(np.int32)
+    
+    # Build surv_idx
+    surv_idx = np.searchsorted(times, durations)
+    surv_idx = np.clip(surv_idx, 0, len(times) - 1)
+    
+    c_td = concordance_td(durations, events, surv_array, surv_idx, method='adj_antolini', ipcw=True)
     print(f'  DeepSurv final C-td: {c_td:.4f}')
     return c_td, surv
 
+def calc_gbsa_c(model, X, y_event, y_duration):
+    """
+    Evaluate a fitted GradientBoostingSurvivalAnalysis model by computing
+    the time-dependent C-index (C-td) on a given dataset.
+
+    The C-td is based on Antolini et al. with an additional IPCW weight based
+    on Uno et al.
+
+    Args:
+        model (GradientBoostingSurvivalAnalysis): Fitted sksurv GBSA model.
+        X (pd.DataFrame): Feature matrix to evaluate on (NaN-free).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+
+    Returns:
+        tuple:
+            c_td (float): Time-dependent concordance index on the provided dataset.
+            surv (pd.DataFrame): Predicted survival functions, shape
+                (n_timepoints, n_subjects).
+    """
+    surv_funcs  = model.predict_survival_function(X)
+    time_grid   = surv_funcs[0].x
+    surv_matrix = np.row_stack([fn(time_grid) for fn in surv_funcs]).T
+    surv        = pd.DataFrame(surv_matrix, index=time_grid)
+    surv_idx = np.searchsorted(time_grid, y_duration)
+    surv_idx = np.clip(surv_idx, 0, len(time_grid) - 1)
+
+    c_td = concordance_td(y_duration, y_event, surv, surv_idx, method='adj_antolini',ipcw=True)
+    print(f'  GBSA final C-td: {c_td:.4f}')
+    return c_td, surv
 
 def weighted_ensemble(risk_score_dict, weights_dict, y_event, y_duration, label, n_trials=50):
     '''
