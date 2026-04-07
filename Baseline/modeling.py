@@ -629,3 +629,90 @@ def lgb_factory(X_tr, y_ev, y_dur):
     ds = lgb.Dataset(X_tr, label=risk, weight=w)
     m = lgb.train(params, ds)
     return m.predict  # returns callable
+
+def weighted_ensemble_td(risk_score_dict, y_event, y_duration, label, n_trials=50):
+    '''
+    Combine survival function predictions from multiple models using Optuna-optimized weights,
+    evaluated with Antolini's time-dependent concordance index (adj_antolini, IPCW-weighted).
+
+    risk_score_dict: {model_name: DataFrame with columns=patient_ids, rows=time_points}
+                     Each cell contains S(t|x) — survival probability for a patient at a time.
+                     Tables may have different time indices; they will be aligned to a common
+                     union index by forward/backward filling within each column.
+    y_event:         np.ndarray of event indicators (1=event, 0=censored)
+    y_duration:      np.ndarray of observed times
+    label:           Label for logging
+    n_trials:        Number of Optuna optimization trials
+
+    Returns: (best_c_index, ensemble_survival_df, best_weights)
+    '''
+    model_names = list(risk_score_dict.keys())
+
+    # Validate all tables share the same patient columns
+    ref_cols = risk_score_dict[model_names[0]].columns
+    for name in model_names[1:]:
+        assert (risk_score_dict[name].columns == ref_cols).all(), \
+            f"Patient ID mismatch: {name} vs {model_names[0]}"
+
+    # Build union time index across all models
+    union_index = ref_cols  # reuse variable name would be confusing; build properly:
+    union_index = risk_score_dict[model_names[0]].index
+    for name in model_names[1:]:
+        union_index = union_index.union(risk_score_dict[name].index)
+    union_index = union_index.sort_values()
+
+    # Reindex each model's survival table to the union time index.
+    # Use nearest-time filling strictly within each column (no cross-column fill).
+    # method='nearest' picks the closest existing time point for any new row.
+    # limit=None allows filling across arbitrarily large gaps, which is appropriate
+    # for survival functions that change slowly between observed time points.
+    normed = {}
+    for name, df in risk_score_dict.items():
+        reindexed = (
+            df.reindex(union_index)
+              .interpolate(method='index', axis=0, limit_area='inside')  # interpolate interior gaps
+              .ffill(axis=0)   # extend flat after last observed time (survival stays constant)
+              .bfill(axis=0)   # fill any leading NaNs before first observed time
+              .clip(lower=0.0, upper=1.0)
+        )
+        normed[name] = reindexed
+
+    # Pre-compute surv_idx once outside the objective
+    time_points = union_index.to_numpy()
+    surv_idx = np.searchsorted(time_points, y_duration, side='right') - 1
+    surv_idx = np.clip(surv_idx, 0, len(time_points) - 1).astype(np.int64)
+
+    def _blend_surv(weights):
+        return sum(w * normed[name] for w, name in zip(weights, model_names))
+
+    def _cindex(surv_df):
+        return concordance_td(
+            durations=y_duration,
+            events=y_event,
+            surv=surv_df.values,
+            surv_idx=surv_idx,
+            method='adj_antolini',
+            ipcw=True,
+        )
+
+    def objective(trial):
+        raw_weights = [trial.suggest_float(f'w_{name}', 0.0, 1.0) for name in model_names]
+        total = sum(raw_weights) + 1e-9
+        norm_weights = [w / total for w in raw_weights]
+        return _cindex(_blend_surv(norm_weights))
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    # Reconstruct best ensemble
+    best = study.best_params
+    raw_weights = [best[f'w_{name}'] for name in model_names]
+    total = sum(raw_weights) + 1e-9
+    best_weights = {name: w / total for name, w in zip(model_names, raw_weights)}
+
+    ensemble_surv_df = _blend_surv(list(best_weights.values()))
+    c = _cindex(ensemble_surv_df)
+
+    print(f'  [{label}] Optimized ensemble C-index: {c:.4f} | weights: {best_weights}')
+    return c, ensemble_surv_df, best_weights
