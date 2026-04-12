@@ -1,29 +1,44 @@
-# Core data science
-numpy>=1.24
-pandas>=2.0
-scipy>=1.11
-matplotlib>=3.7
-seaborn>=0.12
-tqdm>=4.65
+numpy==1.26.4
+pandas==2.3.3
+scipy==1.16.2
+patsy==1.0.1
 
-# Machine learning
-scikit-learn>=1.3
-lightgbm>=4.0
-xgboost>=2.0
-optuna>=3.3
-shap>=0.43
+matplotlib==3.10.6
+seaborn==0.13.2
+plotly==6.3.1
+tqdm==4.67.1
 
-# Survival analysis
-lifelines>=0.27
-scikit-survival>=0.22
+scikit-learn==1.3.2
+lightgbm==4.6.0
+xgboost==3.1.0
+optuna==4.7.0
+shap==0.46.0
 
-# Deep learning survival
-torch>=2.0
-torchtuples>=0.2.2
-pycox>=0.2.3
+lifelines==0.27.8
+scikit-survival==0.22.2
+torchtuples==0.2.2
+pycox==0.3.0
 
-# Neuroimaging / harmonization
-neuroCombat>=0.2.12
+neuroCombat==0.2.12
+fancyimpute==0.7.0
 
-# Imputation
-fancyimpute>=0.7
+torch==2.2.2
+torchvision==0.17.2
+torchaudio==2.2.2
+accelerate==1.13.0
+safetensors==0.6.2
+
+monai==1.4.0
+brainiac-model==0.1.1
+nibabel==5.3.2
+SimpleITK==2.4.1
+transformers==4.57.1
+einops==0.8.2
+statsmodels==0.14.5
+joblib==1.5.2
+PyYAML==6.0.2
+requests==2.32.5
+
+jupyterlab==4.4.9
+ipywidgets==8.1.7
+ipykernel==6.29.5
