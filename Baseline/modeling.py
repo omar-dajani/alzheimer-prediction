@@ -8,6 +8,7 @@ import warnings
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, mean_squared_error, r2_score
 from lifelines.utils import concordance_index
+import lightgbm as lgb #for CSF imputation not survival modeling
 
 # Deepsurv imports
 import torch
@@ -80,6 +81,41 @@ def load_checkpoint(name):
         return obj
     return None
 
+def build_csf_imputer(df_baseline, target_col='ABETA', seed=RANDOM_SEED):
+    '''
+    Train a LightGBM model to predict CSF ABETA from available features.
+    Returns fitted model and predictor feature list.
+    '''
+    predictor_cols = [
+    'AGE', 'PTGENDER_num', 'PTEDUCAT', 'APOE4',
+    'Hippocampus_ICV', 'Entorhinal_ICV', 'Ventricles_ICV',
+    'MMSE', 'CDRSB', 'ADAS13', 'FAQ',
+    'AV45', 'FDG',   # PET where available — these are legitimately available without LP
+    ]
+    predictor_cols = [c for c in predictor_cols if c in df_baseline.columns]
+
+    known = df_baseline[df_baseline[target_col].notna()].copy()
+    X_csf = known[predictor_cols].copy()
+    y_csf = known[target_col].values
+
+    # Impute predictors with median for this sub-model
+    X_csf = X_csf.fillna(X_csf.median())
+
+    # Hold out 15% to evaluate imputation quality
+    from sklearn.model_selection import train_test_split
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X_csf, y_csf, test_size=0.15, random_state=seed)
+
+    model = lgb.LGBMRegressor(
+        n_estimators=400, learning_rate=0.05, num_leaves=31,
+        min_child_samples=15, random_state=seed, verbose=-1)
+    model.fit(X_tr, y_tr, eval_set=[(X_te, y_te)])
+
+    preds = model.predict(X_te)
+    rmse = np.sqrt(mean_squared_error(y_te, preds))
+    r2   = r2_score(y_te, preds)
+    print(f'  CSF imputer for {target_col}: holdout RMSE={rmse:.1f}, R²={r2:.3f}')
+    return model, predictor_cols
 
 def cv_cindex(X, y_event, y_duration, predict_fn, n_folds=N_FOLDS, seed=RANDOM_SEED):
     '''
