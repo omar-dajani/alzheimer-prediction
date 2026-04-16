@@ -5,12 +5,9 @@ import pandas as pd
 import optuna
 from tqdm.notebook import tqdm
 import warnings
-
-# LightGBM imports
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, mean_squared_error, r2_score
 from lifelines.utils import concordance_index
-import lightgbm as lgb
 
 # Deepsurv imports
 import torch
@@ -174,115 +171,6 @@ def horizon_aucs(X_imp, y_event, y_duration, train_predict_fn, horizons=HORIZONS
             print(f'  AUC {h}yr: {aucs[h][0]:.4f} ± {aucs[h][1]:.4f}')
     return aucs
 
-
-def build_csf_imputer(df_baseline, target_col='ABETA', seed=RANDOM_SEED):
-    '''
-    Train a LightGBM model to predict CSF ABETA from available features.
-    Returns fitted model and predictor feature list.
-    '''
-    predictor_cols = [
-    'AGE', 'PTGENDER_num', 'PTEDUCAT', 'APOE4',
-    'Hippocampus_ICV', 'Entorhinal_ICV', 'Ventricles_ICV',
-    'MMSE', 'CDRSB', 'ADAS13', 'FAQ',
-    'AV45', 'FDG',   # PET where available — these are legitimately available without LP
-    ]
-    predictor_cols = [c for c in predictor_cols if c in df_baseline.columns]
-
-    known = df_baseline[df_baseline[target_col].notna()].copy()
-    X_csf = known[predictor_cols].copy()
-    y_csf = known[target_col].values
-
-    # Impute predictors with median for this sub-model
-    X_csf = X_csf.fillna(X_csf.median())
-
-    # Hold out 15% to evaluate imputation quality
-    from sklearn.model_selection import train_test_split
-    X_tr, X_te, y_tr, y_te = train_test_split(
-        X_csf, y_csf, test_size=0.15, random_state=seed)
-
-    model = lgb.LGBMRegressor(
-        n_estimators=400, learning_rate=0.05, num_leaves=31,
-        min_child_samples=15, random_state=seed, verbose=-1)
-    model.fit(X_tr, y_tr, eval_set=[(X_te, y_te)])
-
-    preds = model.predict(X_te)
-    rmse = np.sqrt(mean_squared_error(y_te, preds))
-    r2   = r2_score(y_te, preds)
-    print(f'  CSF imputer for {target_col}: holdout RMSE={rmse:.1f}, R²={r2:.3f}')
-    return model, predictor_cols
-
-def lgb_survival_cv(X_imp, y_event, y_duration, feature_names, label,
-                     n_trials=30, seed=RANDOM_SEED):
-    """
-    Train and tune a LightGBM survival model using a log-risk regression target,
-    with Optuna Bayesian hyperparameter optimization and stratified cross-validation.
-
-    The survival target is constructed as -log1p(duration), with event subjects
-    upweighted 3× to compensate for censoring imbalance. The best hyperparameters
-    found by Optuna are used to refit a final model on the full dataset.
-
-    Args:
-        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
-        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
-        y_duration (np.ndarray): Time to event or censoring in years.
-        feature_names (list[str]): Feature column names for LGB Dataset construction.
-        label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
-        n_trials (int): Number of Optuna hyperparameter search trials. Default 30.
-        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
-
-    Returns:
-        tuple:
-            c (float): C-index of the final model evaluated on the full training set.
-            imp (pd.Series): Feature importances by gain, sorted descending.
-            final_model (lgb.Booster): Final LightGBM model fitted on all data.
-    """
-    risk_target = -np.log1p(y_duration)
-    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
-
-    def objective(trial):
-        params = dict(
-            objective='regression_l1',
-            device=LGB_DEVICE,
-            learning_rate=trial.suggest_float('lr', 0.02, 0.1, log=True),
-            num_leaves=trial.suggest_int('num_leaves', 31, 127),
-            min_child_samples=trial.suggest_int('min_child_samples', 10, 50),
-            feature_fraction=trial.suggest_float('feature_fraction', 0.5, 1.0),
-            bagging_fraction=trial.suggest_float('bagging_fraction', 0.6, 1.0),
-            bagging_freq=5, lambda_l1=0.1, lambda_l2=0.1,
-            verbose=-1, random_state=seed, n_estimators=500,
-        )
-        cs = []
-        for tr, va in skf.split(X_imp, y_event):
-            w = np.where(y_event[tr] == 1, 3.0, 1.0)
-            dtrain = lgb.Dataset(X_imp.iloc[tr], label=risk_target[tr],
-                                 feature_name=feature_names, weight=w)
-            dval   = lgb.Dataset(X_imp.iloc[va], label=risk_target[va],
-                                 feature_name=feature_names, reference=dtrain)
-            m = lgb.train(params, dtrain, valid_sets=[dval],
-                          callbacks=[lgb.early_stopping(50, verbose=False),
-                                     lgb.log_evaluation(-1)])
-            pred = m.predict(X_imp.iloc[va])
-            c = concordance_index(y_duration[va], -pred, y_event[va])
-            cs.append(c)
-        return np.mean(cs)
-
-    study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
-    best = study.best_params
-    print(f'  [{label}] LGB best C: {study.best_value:.4f} | params: {best}')
-
-    # Refit final model
-    w_all = np.where(y_event == 1, 3.0, 1.0)
-    final_params = dict(objective='regression_l1', verbose=-1, random_state=seed,
-                        n_estimators=500, **best)
-    dtrain_all = lgb.Dataset(X_imp, label=risk_target,
-                             feature_name=feature_names, weight=w_all)
-    final_model = lgb.train(final_params, dtrain_all)
-    imp = pd.Series(final_model.feature_importance(importance_type='gain'),
-                    index=feature_names).sort_values(ascending=False)
-    pred = final_model.predict(X_imp)
-    c = concordance_index(y_duration, -pred, y_event)
-    return c, imp, final_model
 
 def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
                      n_trials=30, seed=RANDOM_SEED):
@@ -722,33 +610,6 @@ def domain_ensemble(X_mci, y_event, y_duration, domains_dict,
           f'{dict(zip(domain_names, meta.coef_))}')
     return c
 
-
-
-def lgb_factory(X_tr, y_ev, y_dur):
-    """
-    Factory function that returns a LightGBM training closure pre-configured
-    with the given hyperparameters, for use inside cv_cindex or horizon_aucs.
-
-    The returned function trains a LGB model on (X_train, y_event, y_duration)
-    and returns risk scores on X_val, compatible with the cv_cindex interface.
-
-    Args:
-        params (dict): LightGBM hyperparameters to pass to lgb.train(),
-            e.g. num_leaves, learning_rate, feature_fraction.
-        feature_names (list[str]): Feature column names for the LGB Dataset.
-        seed (int): Random seed for reproducibility. Default RANDOM_SEED.
-
-    Returns:
-        callable: A function with signature
-            (X_train, y_ev_tr, y_dur_tr, X_val) -> risk_scores (np.ndarray).
-    """
-    risk = -np.log1p(y_dur)
-    w = np.where(y_ev == 1, 3.0, 1.0)
-    params = dict(objective='regression_l1', n_estimators=200, learning_rate=0.05,
-                  num_leaves=31, verbose=-1)
-    ds = lgb.Dataset(X_tr, label=risk, weight=w)
-    m = lgb.train(params, ds)
-    return m.predict  # returns callable
 
 def weighted_ensemble_td(risk_score_dict, y_event, y_duration, label, n_trials=50):
     '''
