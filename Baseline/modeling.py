@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import optuna
 from tqdm.notebook import tqdm
+import warnings
 
 # LightGBM imports
 from sklearn.model_selection import StratifiedKFold
@@ -18,6 +19,9 @@ from pycox.models import CoxPH as PycoxCoxPH
 from pycox.evaluation import EvalSurv
 from sklearn.preprocessing import StandardScaler
 from concordance import concordance_td
+
+# Cox PH imports
+from lifelines import CoxPHFitter
 
 # Ensemble imports
 from sklearn.linear_model import RidgeCV
@@ -528,6 +532,122 @@ def calc_gbsa_c(model, X, y_event, y_duration):
 
     c_td = concordance_td(y_duration, y_event, surv, surv_idx, method='adj_antolini',ipcw=True)
     print(f'  GBSA final C-td: {c_td:.4f}')
+    return c_td, surv
+
+def run_cox_ph(X_imp, y_event, y_duration, label, n_trials=30, seed=RANDOM_SEED):
+    """
+    Train and tune a regularised Cox PH model (lifelines CoxPHFitter) with
+    Optuna hyperparameter search and stratified cross-validation.
+ 
+    Features are standardised before fitting (same pattern as run_deepsurv).
+    The penaliser weight and L1 ratio are optimised jointly via Optuna; l1_ratio=0
+    is ridge, l1_ratio=1 is lasso, intermediate values give elastic net.
+ 
+    HPO uses Harrell C on each val fold for speed; the final reported metric uses
+    adj_antolini IPCW C-td, consistent with GBSA and DeepSurv evaluation.
+ 
+    Args:
+        X_imp (pd.DataFrame): Fully imputed feature matrix (no NaNs).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+        label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
+        n_trials (int): Number of Optuna HPO trials. Default 30.
+        seed (int): Random seed. Default RANDOM_SEED.
+ 
+    Returns:
+        tuple:
+            best_c_cv (float): Best Harrell C from HPO cross-validation.
+            final_model (CoxPHFitter): Final model fitted on all data.
+            scaler (StandardScaler): Fitted scaler — must be applied to any new
+                data before passing to calc_cox_ph_c.
+    """
+    np.random.seed(seed)
+ 
+    scaler = StandardScaler()
+    X_scaled = pd.DataFrame(scaler.fit_transform(X_imp.values), columns=X_imp.columns)
+ 
+    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
+ 
+    def _fit(X_df, y_ev, y_dur, penalizer, l1_ratio):
+        df = X_df.copy()
+        df['_duration'] = y_dur
+        df['_event'] = y_ev.astype(int)
+        fitter = CoxPHFitter(penalizer=penalizer, l1_ratio=l1_ratio)
+        fitter.fit(df, duration_col='_duration', event_col='_event', show_progress=False)
+        return fitter
+ 
+    def objective(trial):
+        penalizer = trial.suggest_float('penalizer', 1e-3, 10.0, log=True)
+        l1_ratio  = trial.suggest_float('l1_ratio', 0.0, 1.0)
+        fold_cs = []
+        for tr, va in skf.split(X_scaled, y_event):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                try:
+                    fitter = _fit(X_scaled.iloc[tr], y_event[tr], y_duration[tr],
+                                  penalizer, l1_ratio)
+                    val_df = X_scaled.iloc[va].copy()
+                    val_df['_duration'] = y_duration[va]
+                    val_df['_event'] = y_event[va].astype(int)
+                    c = fitter.score(val_df, scoring_method='concordance_index')
+                except Exception:
+                    c = 0.0
+            fold_cs.append(c)
+        return np.mean(fold_cs)
+ 
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    best = study.best_params
+    print(f'  [{label}] CoxPH best CV C: {study.best_value:.4f} | params: {best}')
+ 
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        final_model = _fit(X_scaled, y_event, y_duration,
+                           best['penalizer'], best['l1_ratio'])
+ 
+    return study.best_value, final_model, scaler
+ 
+ 
+def calc_cox_ph_c(model, scaler, X, y_event, y_duration):
+    """
+    Evaluate a fitted CoxPHFitter model using the adj_antolini IPCW C-td,
+    and return the full survival curve matrix for use in the ensemble.
+ 
+    Survival curves are predicted on a time grid of observed event times,
+    producing a (n_times × n_subjects) DataFrame matching the output format
+    of calc_gbsa_c and calc_deepsurv_c.
+ 
+    Args:
+        model (CoxPHFitter): Fitted CoxPHFitter returned by run_cox_ph.
+        scaler (StandardScaler): Fitted scaler returned by run_cox_ph.
+        X (pd.DataFrame): Feature matrix (NaN-free, unscaled).
+        y_event (np.ndarray): Binary event indicators (1=event, 0=censored).
+        y_duration (np.ndarray): Time to event or censoring in years.
+ 
+    Returns:
+        tuple:
+            c_td (float): adj_antolini IPCW C-td on the provided data.
+            surv (pd.DataFrame): Predicted survival functions, shape
+                (n_timepoints, n_subjects). Compatible with weighted_ensemble_td
+                and plot_individual_survival_curves.
+    """
+    X_scaled = pd.DataFrame(scaler.transform(X.values), columns=X.columns)
+    time_grid = np.sort(np.unique(y_duration[y_event == 1])).astype(np.float64)
+ 
+    surv = model.predict_survival_function(X_scaled.reset_index(drop=True),
+                                            times=time_grid)
+    surv.index = time_grid
+    surv.columns = range(len(X_scaled))
+    surv = surv.clip(lower=0.0, upper=1.0)
+ 
+    surv_arr = surv.values.astype(np.float64)
+    surv_idx = np.searchsorted(time_grid, y_duration)
+    surv_idx = np.clip(surv_idx, 0, len(time_grid) - 1).astype(np.int64)
+ 
+    c_td = concordance_td(y_duration.astype(np.float64), y_event.astype(np.int32),
+                           surv_arr, surv_idx, method='adj_antolini', ipcw=True)
+    print(f'  CoxPH final C-td: {c_td:.4f}')
     return c_td, surv
 
 def weighted_ensemble(risk_score_dict, weights_dict, y_event, y_duration, label, n_trials=50):
