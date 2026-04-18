@@ -17,6 +17,9 @@ shap==0.46.0
 
 lifelines==0.27.8
 scikit-survival==0.22.2
+torch==2.2.2
+torchvision==0.17.2
+torchaudio==2.2.2
 torchtuples==0.2.2
 pycox==0.3.0
 
