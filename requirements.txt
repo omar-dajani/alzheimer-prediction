@@ -22,23 +22,17 @@ pycox==0.3.0
 neuroCombat==0.2.12
 fancyimpute==0.7.0
 
-torch==2.2.2
-torchvision==0.17.2
-torchaudio==2.2.2
 accelerate==1.13.0
 safetensors==0.6.2
 
 monai==1.4.0
-brainiac-model==0.1.1
 nibabel==5.3.2
 SimpleITK==2.4.1
 transformers==4.57.1
 einops==0.8.2
 statsmodels==0.14.5
 joblib==1.5.2
+
 PyYAML==6.0.2
 requests==2.32.5
-
-jupyterlab==4.4.9
 ipywidgets==8.1.7
-ipykernel==6.29.5
