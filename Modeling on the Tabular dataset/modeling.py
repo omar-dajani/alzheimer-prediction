@@ -501,7 +501,7 @@ def run_cox_ph(X_imp, y_event, y_duration, label, n_trials=30, seed=RANDOM_SEED)
         return fitter
  
     def objective(trial):
-        penalizer = trial.suggest_float('penalizer', 0.1, 50.0, log=True)
+        penalizer = trial.suggest_float('penalizer', 1e-3, 10.0, log=True)
         l1_ratio  = trial.suggest_float('l1_ratio', 0.0, 1.0)
         fold_cs = []
         for tr, va in skf.split(X_scaled, y_event):
