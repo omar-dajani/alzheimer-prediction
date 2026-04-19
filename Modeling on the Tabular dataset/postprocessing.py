@@ -190,7 +190,9 @@ def plot_individual_survival_curves(
     for spine in ax.spines.values():
         spine.set_edgecolor("#D3D1C7")
 
-    ax.legend(frameon=True, framealpha=0.9, fontsize=10,
-              edgecolor="#D3D1C7", loc="upper right")
-    fig.tight_layout()
+    ax.legend(frameon=True, framealpha=0.9, fontsize=8,
+          edgecolor="#D3D1C7",
+          bbox_to_anchor=(0.5, -0.18), loc='upper center',
+          borderaxespad=0, ncol=3)
+fig.tight_layout(pad=3.0)
     plt.show()
