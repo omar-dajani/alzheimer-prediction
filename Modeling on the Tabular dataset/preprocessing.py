@@ -11,7 +11,6 @@ from neuroCombat import neuroCombat
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from tqdm.notebook import tqdm
-import time
 from config import RANDOM_SEED, N_FOLDS, HORIZONS, FIG_DIR, CHECKPOINT_DIR, OUT_DIR, MRI_HARMONIZE_COLS, BASE_DIR
 
 
@@ -473,17 +472,3 @@ def get_domain_features(feature_names):
         domains[d] = [f for f in combined if f in feature_names]
     return domains
 
-
-def test_tqdm():
-    """
-    Smoke test to verify tqdm progress bars render correctly in the current
-    environment (Colab notebook vs local terminal).
-
-    Runs a short dummy loop with a tqdm progress bar. No side effects.
-
-    Returns:
-        None. Prints a confirmation message on success.
-    """
-    import time
-    for i in tqdm(range(20), desc="Testing bar"):
-        time.sleep(0.2)

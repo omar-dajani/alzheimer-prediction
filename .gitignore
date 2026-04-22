@@ -1,5 +1,6 @@
 # Data (ADNI DUA — never commit)
 Baseline/tables/*.csv
+'Modeling on the Tabular dataset'/tables/*.csv
 
 # OS
 .DS_Store
