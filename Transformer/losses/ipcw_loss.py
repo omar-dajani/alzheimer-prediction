@@ -134,9 +134,15 @@ class CensoringSurvivalEstimator:
                 "CensoringSurvivalEstimator has not been fitted. "
                 "Call .fit(durations, events) first."
             )
-        # Evaluate KM survival function at each query time
-        # lifelines predict() returns a DataFrame; extract values
-        g_values = self._kmf.predict(t).values
+        # Evaluate KM survival function at each query time.
+        # lifelines predict() returns a pandas Series for list/array input
+        # but a bare numpy scalar for single-element arrays. We normalise
+        # both cases to a 1-D ndarray for uniform downstream handling.
+        prediction = self._kmf.predict(t)
+        if hasattr(prediction, "values"):
+            g_values = np.asarray(prediction.values)
+        else:
+            g_values = np.atleast_1d(np.asarray(prediction))
 
         # Clip to prevent division by zero in IPCW weights
         g_values = np.clip(g_values, 1e-7, 1.0)

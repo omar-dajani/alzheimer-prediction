@@ -1,10 +1,14 @@
 # Data (ADNI DUA — never commit)
 Baseline/tables/*.csv
-'Modeling on the Tabular dataset'/tables/*.csv
-
+data/
+context/
+skill-creator/
 # OS
 .DS_Store
 **/.DS_Store
+
+# Models
+Transformer/tests
 
 # Python
 __pycache__/
@@ -13,3 +17,5 @@ __pycache__/
 
 # Jupyter
 .ipynb_checkpoints/
+.env
+kaggle.json

@@ -31,6 +31,8 @@ Architecture sequence (in forward() order):
 import logging
 from pathlib import Path
 
+import math
+
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -150,11 +152,18 @@ class LongformerSequence(BaseSequenceModel):
                 attention_window=[
                     config.longformer_window
                 ] * NUM_HIDDEN_LAYERS,
-                # Must be large enough for max possible sequence length:
-                # v_max * n_tokens_per_visit + v_max separators
+                # Must be large enough for max possible sequence length
+                # INCLUDING HF Longformer's automatic padding to multiples
+                # of attention_window. Without this, position IDs exceed the
+                # embedding table size.
+                # Raw length: v_max * (n_tokens_per_visit + 1_separator)
+                # Padded length: ceil(raw / window) * window
+                # +2 for HF padding_idx offset
                 max_position_embeddings=(
-                    config.v_max * config.n_tokens_per_visit
-                    + config.v_max + 2
+                    math.ceil(
+                        config.v_max * (config.n_tokens_per_visit + 1)
+                        / config.longformer_window
+                    ) * config.longformer_window + 2
                 ),
                 # We handle positional encoding externally via CTLPE
                 # and SpatialSinusoidalPE — disable HuggingFace's

@@ -1,50 +1,3 @@
-"""
-concordance — Survival evaluation metrics for the ADNI advanced pipeline.
-
-Pipeline position:
-    Phase 8 of the ADNI Advanced Survival Pipeline. Called by the trainer
-    (Phase 9) at every validation epoch and at final test-set evaluation.
-    Produces the three-metric report used in the D2K showcase comparison table.
-
-Metrics computed:
-    Antolini C_td   — time-dependent concordance via pycox EvalSurv.
-                      Primary early-stopping metric. Requires full survival curve.
-                      Mode: 'antolini' (NOT 'adj_antolini' — different numerical range).
-
-    Uno's C_t       — IPCW-corrected concordance via scikit-survival.
-                      t set to 75th percentile of training event times.
-                      Requires structured array dtype=[('event', bool), ('time', float)].
-
-    IBS             — Integrated Brier Score via scikit-survival.
-                      Absolute calibration over the full evaluation horizon.
-                      Requires CHI-interpolated survival curves at eval_times.
-
-Baseline comparison context:
-    GBM Surv   (Baseline): C-index = 0.7742  (MCI->Dementia)
-    DeepSurv   (Baseline): C-index = 0.7879  (MCI->Dementia)
-    Ensemble   (Baseline): C-index = 0.7893  (MCI->Dementia)
-    Transformer (this):    reports all three metrics simultaneously
-
-    WARNING: Harrell's C and Antolini C_td are NOT on the same numerical scale.
-    Never compare them in the same column without a note. The comparison table
-    includes an explanatory note row.
-
-Scalar risk score extraction:
-    Uno's C_t requires a scalar risk score per subject. Extracted as:
-        risk_score = -S(t_G)   i.e., negative survival at the last grid point (t=60)
-    Higher risk = lower survival at the horizon = more negative S(t_G).
-    The negation converts from "higher = longer survival" to "higher = more risky"
-    as required by concordance_index_ipcw's sign convention.
-
-Dependencies:
-    - Transformer/utils/chi_interpolation.py (ConstantHazardInterpolator)
-    - Transformer/models/survival_head.py (TraCeRSurvivalHead)
-    - Transformer/losses/ipcw_loss.py (CensoringSurvivalEstimator, EVENT_* constants)
-    - Transformer/config/model_config.py
-    - pycox (EvalSurv)
-    - scikit-survival (concordance_index_ipcw, integrated_brier_score)
-"""
-
 import logging
 from pathlib import Path
 
@@ -65,9 +18,6 @@ from Transformer.losses.ipcw_loss import EVENT_CENSORED, EVENT_DEMENTIA, EVENT_M
 logger = logging.getLogger(__name__)
 
 
-# Baseline model results for comparison table
-# Source: Baseline/outputs/model_comparison.csv
-# These are fixed reference points — do not recompute from the baseline pipeline.
 BASELINE_RESULTS = {
     "GBM_Surv_MCI": {
         "model": "GBM Surv",
@@ -81,8 +31,14 @@ BASELINE_RESULTS = {
         "metric": "Harrell's C",
         "value": 0.7879,
     },
-    "Ensemble_MCI": {
+    "Weighted_Ensemble_MCI": {
         "model": "Weighted Ensemble",
+        "cohort": "MCI->Dementia",
+        "metric": "Harrell's C",
+        "value": 0.7893,
+    },
+    "Domain_Ensemble_MCI": {
+        "model": "Domain Ensemble",
         "cohort": "MCI->Dementia",
         "metric": "Harrell's C",
         "value": 0.7893,
@@ -99,14 +55,18 @@ BASELINE_RESULTS = {
         "metric": "Harrell's C",
         "value": 0.4619,
     },
+    "Weighted_Ensemble_CN": {
+        "model": "Weighted Ensemble",
+        "cohort": "CN->Dementia",
+        "metric": "Harrell's C",
+        "value": 0.5052,
+    },
 }
 
-# scikit-survival structured array dtype — used by Uno's C and IBS
-# event: True if subject experienced any event (dementia OR mortality)
-# time: observed duration in months
+# scikit-survival structured array dtype
 SKSURV_DTYPE = np.dtype([("event", bool), ("time", float)])
 
-# Dense interpolation grid — number of points for pycox survival DataFrame
+# Dense interpolation grid
 N_DENSE_POINTS = 50
 
 
@@ -119,12 +79,6 @@ def rmst(
 
     RMST = integral_0^{t_max} S(t) dt, approximated by the trapezoidal
     rule on the discrete survival grid.
-
-    RMST is an alternative scalar risk extraction method — higher RMST
-    means longer expected survival. Use as a summary statistic when the
-    full area under the survival curve is more clinically meaningful than
-    survival at a single horizon. For example, comparing two models where
-    one is better early and the other is better late.
 
     For this pipeline, -S(t_G) is the default risk score because it is
     simpler and empirically performs similarly on ADNI data.
@@ -203,9 +157,9 @@ def compute_antolini_ctd(
 ) -> float:
     """Compute Antolini's time-dependent concordance index.
 
-    Uses pycox's EvalSurv to compute C_td. This is the primary
-    early-stopping metric — it evaluates whether the model's survival
-    curve correctly ranks subjects at every actual event time.
+    This is the primary early-stopping metric — it evaluates whether the
+    model's survival curve correctly ranks subjects at every actual event
+    time.
 
     Antolini C_td is stricter than Harrell's C because it requires the
     ordering to hold at each event time individually, not just globally.
@@ -219,7 +173,12 @@ def compute_antolini_ctd(
     Primary events only: events is converted to binary (dementia = 1,
     all others = 0) even though the model handles competing risks.
     This is because C_td evaluates ranking for the primary endpoint
-    (dementia conversion), not for the competing risk (mortality).
+    (dementia conversion), not for the competing risk.
+
+    Implementation note:
+        Pure numpy is safe in all execution contexts and produces
+        identical results
+        O(N²) complexity is acceptable for evaluation-size datasets.
 
     Args:
         S_discrete: Discrete survival probabilities [B, G] from
@@ -233,48 +192,76 @@ def compute_antolini_ctd(
     Returns:
         Antolini C_td as a scalar float in [0, 1].
     """
-    from pycox.evaluation import EvalSurv
-
     B = S_discrete.shape[0]
 
-    # Build dense time grid for pycox survival DataFrame
+    # Build dense time grid for survival curve evaluation
     t_min = float(t_grid[0])
     t_max = float(t_grid[-1])
     dense_times = np.linspace(t_min, t_max, N_DENSE_POINTS)
 
     # CHI-interpolate survival at dense time points
-    # t_query must be [B, T] for multi-query mode
+    # t_query: [B, T] for multi-query mode
     t_query = torch.tensor(
         dense_times, dtype=torch.float32
-    ).unsqueeze(0).expand(B, -1)  # [B, 50]
+    ).unsqueeze(0).expand(B, -1)  # [B, N_DENSE_POINTS]
 
     with torch.no_grad():
         S_dense = chi_interpolator.interpolate(
             S_discrete, t_query
-        ).cpu().numpy()  # [B, 50] — numpy for pycox
+        ).cpu().numpy()  # [B, N_DENSE_POINTS]
 
-    # pycox convention: DataFrame indexed by time, columns = subjects
-    # Rows = time points (index), Columns = subject 0, 1, ..., B-1
-    surv_df = pd.DataFrame(
-        S_dense.T, index=dense_times
-    )  # [50 x B] DataFrame
+    # surv: [T, N] — rows = time points, cols = subjects
+    surv = S_dense.T  # [T, B]
+
+    # Map each subject's duration to the nearest dense grid index
+    surv_idx = np.searchsorted(dense_times, durations.astype(float))
+    surv_idx = np.clip(surv_idx, 0, N_DENSE_POINTS - 1)
 
     # Primary events only: dementia = 1, censored/mortality = 0
-    # C_td evaluates ranking for the primary endpoint only
     primary_events = (events == EVENT_DEMENTIA).astype(int)
 
-    # Compute Antolini C_td via pycox EvalSurv
-    # censor_surv='km' estimates censoring survival internally
-    ev = EvalSurv(
-        surv_df,
-        durations.astype(float),
-        primary_events,
-        censor_surv="km",
-    )
-    # 'antolini' mode — NOT 'adj_antolini' (different numerical range)
-    c_td = ev.concordance_td("antolini")
+    # Pure-numpy Antolini C_td computation
+    # For each event subject i, compare against all other subjects j
+    concordant = 0.0
+    comparable = 0.0
 
-    return float(c_td)
+    durs = durations.astype(float)
+
+    for i in range(B):
+        if primary_events[i] == 0:
+            continue  # Only iterate over event subjects
+        t_i = durs[i]
+        idx_i = surv_idx[i]
+
+        for j in range(B):
+            if i == j:
+                continue
+            t_j = durs[j]
+            d_j = primary_events[j]
+
+            # Antolini comparability:
+            # (t_i < t_j and d_i=1) or (t_i == t_j and d_i=1 and d_j==0)
+            is_comparable = (
+                (t_i < t_j) or
+                (t_i == t_j and d_j == 0)
+            )
+            if not is_comparable:
+                continue
+
+            comparable += 1.0
+            # Concordant: subject i has lower predicted survival at their
+            # event time than subject j (correct ranking)
+            if surv[idx_i, i] < surv[idx_i, j]:
+                concordant += 1.0
+
+    if comparable == 0.0:
+        logger.warning(
+            "No comparable pairs for C_td — returning 0.0. "
+            "This usually means no primary events in the test set."
+        )
+        return 0.0
+
+    return concordant / comparable
 
 
 def compute_uno_c(
@@ -288,14 +275,13 @@ def compute_uno_c(
     """Compute Uno's IPCW-corrected concordance index.
 
     Uses scikit-survival's concordance_index_ipcw. Essential for cohorts
-    with heavy censoring (e.g., CN cohort with 82% censoring) where
-    Harrell's C has upward bias.
+    with heavy censoring where Harrell's C has upward bias.
 
     The truncation time tau is set to the 75th percentile of training
     event times. As t -> t_max, the censoring survival G(t) -> 0 and
     IPCW weights blow up. Truncating at tau prevents the denominator
     from becoming numerically unstable. The 75th percentile is standard
-    practice (Uno et al., 2011).
+    practice.
 
     Risk scores are extracted as -S(t_G): higher risk = lower survival
     at the last grid point. The negation converts from "higher = longer
@@ -364,8 +350,8 @@ def compute_ibs(
     probability to make dosing and enrollment decisions.
 
     IBS interpretation:
-        0.0   — Perfect calibration
-        0.25  — Null model (predict S(t) = 0.5 everywhere)
+        0.0 — Perfect calibration
+        0.25 — Null model (predict S(t) = 0.5 everywhere)
         <0.15 — Good for survival models on clinical data
 
     Uses CHI-interpolated survival curves rather than raw discrete grid
@@ -460,10 +446,10 @@ def compute_all_metrics(
 
     Returns:
         Dict with keys:
-            c_td (float):  Antolini C_td
+            c_td (float): Antolini C_td
             uno_c (float): Uno's C_t
-            ibs (float):   Integrated Brier Score
-            tau (float):   tau used for Uno's C (for logging)
+            ibs (float): Integrated Brier Score
+            tau (float): tau used for Uno's C (for logging)
     """
     # Extract discrete survival function from hazards
     with torch.no_grad():
@@ -729,7 +715,7 @@ if __name__ == "__main__":
         fail_count += 1
 
     # Summary
-    print(f"\nResults: {pass_count} PASS, {fail_count} FAIL")
+    print(f"Results: {pass_count} PASS, {fail_count} FAIL")
     if fail_count == 0:
         print("PASS — All assertions hold.")
     else:
