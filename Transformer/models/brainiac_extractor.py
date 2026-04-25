@@ -44,6 +44,7 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 import sys
 sys.path.insert(
@@ -68,6 +69,50 @@ SPATIAL_GRID_SIZE = 8
 
 N_SPATIAL_TOKENS = SPATIAL_GRID_SIZE ** 3
 """Total number of spatial tokens: 8x8x8 = 512."""
+
+GROUPNORM_NUM_GROUPS = 16
+"""Number of groups for GroupNorm replacements. All ResNet50 channel
+counts (64, 128, 256, 512, 1024, 2048) are divisible by 16."""
+
+
+def replace_bn3d_with_groupnorm(
+    model: nn.Module,
+    num_groups: int = GROUPNORM_NUM_GROUPS,
+) -> int:
+    """Recursively replace all BatchNorm3d layers with GroupNorm.
+
+    GroupNorm is preferred over BatchNorm3d for two reasons:
+        1. MPS rank-5 normalization latency bug — BatchNorm3d on 5-D
+           tensors is extremely slow on Apple Silicon's Metal backend.
+        2. Batch-size independence — with micro-batches of 1–2 subjects
+           (each 128^3 volume), BatchNorm statistics are unreliable.
+           GroupNorm normalizes within channel groups per-sample.
+
+    Args:
+        model: The nn.Module to modify in-place.
+        num_groups: Number of groups per GroupNorm layer.
+
+    Returns:
+        Count of BatchNorm3d layers replaced.
+    """
+    count = 0
+    for name, child in model.named_children():
+        if isinstance(child, nn.BatchNorm3d):
+            gn = nn.GroupNorm(
+                num_groups=min(num_groups, child.num_features),
+                num_channels=child.num_features,
+                eps=child.eps,
+                affine=child.affine,
+            )
+            # Copy affine params if they exist
+            if child.affine and child.weight is not None:
+                gn.weight.data.copy_(child.weight.data)
+                gn.bias.data.copy_(child.bias.data)
+            setattr(model, name, gn)
+            count += 1
+        else:
+            count += replace_bn3d_with_groupnorm(child, num_groups)
+    return count
 
 
 # Backbone loader
@@ -114,39 +159,15 @@ def load_brainiac_resnet50(
             cannot be loaded.
     """
     model = None
+    weights_loaded = False
 
-    # Attempt 1: brainiac-model PyPI package
-    try:
-        from brainiac_model import BrainIAC
-
-        model = BrainIAC(no_max_pool=no_max_pool)
-        logger.info(
-            "Loaded BrainIAC ResNet50 from brainiac-model package "
-            "(no_max_pool=%s).",
-            no_max_pool,
-        )
-    except ImportError:
-        logger.warning(
-            "brainiac-model package not found — falling back to MONAI "
-            "ResNet50 with layer config %s.",
-            RESNET_LAYER_CONFIG,
-        )
-
-    # Attempt 2: MONAI fallback
-    if model is None:
+    # ── Path A: Explicit pretrained checkpoint ──────────────────────
+    # Highest priority — user supplied a .pt/.pth file directly.
+    if pretrained_path is not None:
+        pretrained_path = Path(pretrained_path)
         try:
             from monai.networks.nets import ResNet, ResNetBottleneck
 
-            # MONAI quirk: its 3D ResNet always uses stride-1 for conv1,
-            # relying solely on maxpool for the first spatial
-            # downsampling. Setting no_max_pool=True in MONAI removes
-            # the maxpool without adding stride to conv1, yielding only
-            # 8x total downsampling (16^3 output) — wrong for our 512-
-            # token requirement.
-            #
-            # With no_max_pool=False (MONAI default):
-            #   conv1 stride-1 (128→128) + maxpool (128→64) = 2x stem
-            #   + stages 2-4 each 2x = 16x total → 8^3 = 512 tokens 
             model = ResNet(
                 block=ResNetBottleneck,
                 layers=list(RESNET_LAYER_CONFIG),
@@ -155,35 +176,86 @@ def load_brainiac_resnet50(
                 n_input_channels=1,
                 no_max_pool=False,
             )
+            state_dict = torch.load(
+                pretrained_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+            model.load_state_dict(state_dict, strict=False)
+            weights_loaded = True
             logger.info(
-                "Built MONAI ResNet50 (layers=%s, no_max_pool=False "
-                "— MONAI requires maxpool for 16x downsampling).",
-                RESNET_LAYER_CONFIG,
+                "Loaded pre-trained weights from %s.", pretrained_path
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to load weights from %s: %s",
+                pretrained_path, exc,
+            )
+            raise
+
+    # Path B: MONAI MedicalNet pretrained (primary default)
+    # MedicalNet ResNet50 pretrained on 23 medical imaging datasets
+    # Why not the brainiac PyPI package? The brainiac-model package on
+    # PyPI wraps MONAI ResNet50 in a HuggingFace PreTrainedModel, but
+    # the actual SimCLR pretrained weights live on a gated HuggingFace
+    # repo (Divytak/brainiac) requiring authentication. Without auth,
+    # `BrainiacModel(config)` only gives random weights - no better
+    # than our MONAI fallback.  MedicalNet weights are freely available
+    # via MONAI and provide strong 3D medical imaging features.
+    if model is None:
+        try:
+            from monai.networks.nets import resnet50 as monai_resnet50
+
+            model = monai_resnet50(
+                pretrained=True,
+                spatial_dims=3,
+                n_input_channels=1,
+                feed_forward=False,
+                shortcut_type="B",
+                bias_downsample=False,
+            )
+            weights_loaded = True
+            logger.info(
+                "Loaded MedicalNet pretrained ResNet50 (23 datasets, "
+                "including brain MRI). This backbone provides strong "
+                "3D medical imaging features without BrainIAC weights."
+            )
+        except Exception as exc:
+            logger.warning(
+                "MedicalNet pretrained download failed: %s. "
+                "Falling back to random MONAI ResNet50.",
+                exc,
+            )
+
+    # Path D: MONAI random init (last resort)
+    if model is None:
+        try:
+            from monai.networks.nets import ResNet, ResNetBottleneck
+
+            model = ResNet(
+                block=ResNetBottleneck,
+                layers=list(RESNET_LAYER_CONFIG),
+                block_inplanes=[64, 128, 256, 512],
+                spatial_dims=3,
+                n_input_channels=1,
+                no_max_pool=False,
+            )
+            logger.warning(
+                "Using MONAI ResNet50 with RANDOM weights. "
+                "Performance will be significantly worse than with "
+                "pretrained weights."
             )
         except ImportError as exc:
             raise ImportError(
                 "Neither brainiac-model nor MONAI is installed. "
                 "At least one is required to build the 3D ResNet50 "
-                "backbone"
+                "backbone."
             ) from exc
 
-    # Load pre-trained weights
-    if pretrained_path is not None:
-        pretrained_path = Path(pretrained_path)
-        state_dict = torch.load(
-            pretrained_path,
-            map_location="cpu",
-            weights_only=True,
-        )
-        model.load_state_dict(state_dict, strict=False)
-        logger.info(
-            "Loaded pre-trained weights from %s.", pretrained_path
-        )
-    else:
+    if not weights_loaded:
         logger.warning(
-            "No pre-trained weights provided — backbone initialised "
-            "with random weights. Pre-trained BrainIAC weights are "
-            "strongly recommended for convergence."
+            "Backbone has RANDOM weights. For best results, use "
+            "MedicalNet (default) or provide BrainIAC weights."
         )
 
     # Strip classification head and global average pooling
@@ -299,11 +371,13 @@ class BrainIACFeatureExtractor(nn.Module):
         self,
         config: ModelConfig,
         pretrained_path: Optional[Path] = None,
+        use_gradient_checkpointing: bool = True,
     ) -> None:
         super().__init__()
 
         self._d_model = config.d_model
         self._lr_projection_head = config.lr_projection_head
+        self._use_gradient_checkpointing = use_gradient_checkpointing
 
         # no_max_pool=True is the correct flag for the BrainIAC package
         # (stride-2 conv1, no maxpool → 16x total). For the MONAI
@@ -318,9 +392,20 @@ class BrainIACFeatureExtractor(nn.Module):
         # Adapt conv1 from 1-channel MRI to 3-channel DVF input
         adapt_conv1_to_3ch(self.backbone)
 
-        # Projection head (2048 → 1024 → d_model)
-        # Phase 1: Linear(2048, 1024) → LayerNorm(1024) → GELU
-        # Dropout(0.1) → Linear(1024, d_model) → LayerNorm(d_model)
+        # Replace BatchNorm3d -> GroupNorm
+        # Performed AFTER weight loading so that BN affine params are
+        # transferred to GroupNorm (weight/bias copied in the swap).
+        bn_replaced = replace_bn3d_with_groupnorm(
+            self.backbone, num_groups=GROUPNORM_NUM_GROUPS
+        )
+        logger.info(
+            "Replaced %d BatchNorm3d layers with GroupNorm(num_groups=%d)",
+            bn_replaced, GROUPNORM_NUM_GROUPS,
+        )
+
+        # Projection head (2048 -> 1024 -> d_model)
+        # Phase 1: Linear(2048, 1024) -> LayerNorm(1024) -> GELU
+        # Dropout(0.1) -> Linear(1024, d_model) -> LayerNorm(d_model)
         self.projection = nn.Sequential(
             nn.Linear(RESNET_STAGE4_CHANNELS, 1024),
             nn.LayerNorm(1024),
@@ -338,6 +423,9 @@ class BrainIACFeatureExtractor(nn.Module):
         for param in self.projection.parameters():
             param.requires_grad = True
 
+        if self._use_gradient_checkpointing:
+            logger.info("Gradient checkpointing enabled for layer3 + layer4")
+
     # Internal backbone forward (bypasses avgpool / fc / flatten)
     def _backbone_feature_forward(self, x: Tensor) -> Tensor:
         """Run the backbone up through Stage 4, preserving spatial dims.
@@ -345,8 +433,8 @@ class BrainIACFeatureExtractor(nn.Module):
         MONAI's ResNet.forward() includes a hardcoded
         x.view(x.size(0), -1) that flattens the spatial grid even
         when avgpool is replaced with nn.Identity(). This
-        helper runs only the convolutional stages (conv1 → bn1 → act
-        → layer1 → layer2 → layer3 → layer4) and returns the spatial
+        helper runs only the convolutional stages (conv1 -> bn1 -> act
+        -> layer1 -> layer2 -> layer3 -> layer4) and returns the spatial
         feature map without flattening.
 
         Args:
@@ -358,11 +446,11 @@ class BrainIACFeatureExtractor(nn.Module):
         """
         bb = self.backbone
         x = bb.conv1(x) # Stem conv (stride depends on backend)
-        x = bb.bn1(x)
+        x = bb.bn1(x)   # Now GroupNorm after Phase 2 swap
         x = bb.act(x)
         # Apply maxpool if it exists and is not Identity.
-        # MONAI fallback: maxpool present → stride-1 conv + maxpool = 2x
-        # BrainIAC: maxpool absent (no_max_pool=True) → stride-2 conv = 2x
+        # MONAI fallback: maxpool present -> stride-1 conv + maxpool = 2x
+        # BrainIAC: maxpool absent (no_max_pool=True) -> stride-2 conv = 2x
         # Either way the spatial dims should be 64^3 after this stage.
         if (
             hasattr(bb, "maxpool")
@@ -371,8 +459,17 @@ class BrainIACFeatureExtractor(nn.Module):
             x = bb.maxpool(x) # [B, 64, 64, 64, 64]
         x = bb.layer1(x) # [B, 256, 64, 64, 64] (stride 1)
         x = bb.layer2(x) # [B, 512, 32, 32, 32] (stride 2)
-        x = bb.layer3(x) # [B, 1024, 16, 16, 16] (stride 2)
-        x = bb.layer4(x) # [B, 2048, 8, 8, 8] (stride 2)
+
+        # Gradient checkpointing on layer3 + layer4
+        # These are the deepest (and heaviest) residual stages.
+        # Checkpointing trades compute for memory: activations are
+        # discarded during the forward pass and recomputed on backward.
+        if self._use_gradient_checkpointing and self.training:
+            x = grad_checkpoint(bb.layer3, x, use_reentrant=False)
+            x = grad_checkpoint(bb.layer4, x, use_reentrant=False)
+        else:
+            x = bb.layer3(x) # [B, 1024, 16, 16, 16] (stride 2)
+            x = bb.layer4(x) # [B, 2048, 8, 8, 8] (stride 2)
         return x
 
     # Forward pass

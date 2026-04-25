@@ -14,15 +14,19 @@ Outputs:
         dvf_sequence, visit_times, time_deltas, missing_mask, tabular,
         duration, event, subject_id
     - NormalizationStats: serializable stats for inference-time normalization
-
-Dependencies:
-    - Baseline/outputs/ must exist and contain mci_y_duration.npy, mci_y_event.npy
-    - No other Transformer modules are required at this phase
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
+
+import torch
+
+DEVICE = torch.device(
+    "mps" if torch.backends.mps.is_available()
+    else "cuda" if torch.cuda.is_available()
+    else "cpu"
+)
 
 
 @dataclass
@@ -47,12 +51,16 @@ class ModelConfig:
     n_tokens_per_visit: int = 512   # Spatial tokens per visit (8×8×8 BrainIAC grid)
     v_max: int = 10                 # Maximum visits per subject (pad shorter sequences)
     n_grid: int = 5                 # TraCeR temporal grid points
-    n_risks: int = 2                # Competing risks: 0=dementia, 1=mortality
+    n_risks: int = 1                # Single-event survival (dementia only; labels are {0,1})
     pma_seeds: int = 8              # PMA pooling seed vectors
     longformer_window: int = 512    # Sliding-window attention width (= n_tokens_per_visit)
     modality_dropout_p: float = 0.25  # Probability of dropping an entire visit during training
     mamba_d_state: int = 16         # Mamba SSM state dimension
     mamba_expand: int = 2           # Mamba inner dimension multiplier (d_inner = d_model * expand)
+
+    # Hardware / precision fields
+    device: torch.device = field(default_factory=lambda: DEVICE)
+    mps_memory_fraction: float = 0.8  # Cap unified memory usage on Apple Silicon
 
 
     t_grid: List[int] = field(
@@ -60,17 +68,17 @@ class ModelConfig:
     )
 
 
-    random_seed: int = 42           # Must match Baseline/config.py RANDOM_SEED
-    batch_size_physical: int = 2    # Per-GPU batch size (memory-limited by 128^3 volumes)
+    random_seed: int = 42 # Must match Baseline/config.py RANDOM_SEED
+    batch_size_physical: int = 2 # Per-GPU batch size (memory-limited by 128^3 volumes)
     gradient_accumulation_steps: int = 8 # Effective batch = physical x accumulation
-    max_epochs_stage1: int = 5      # LP-FT Stage 1: linear probing (head only)
-    max_epochs_stage2: int = 100    # LP-FT Stage 2: sequence model + head fine-tuning
-    early_stopping_patience: int = 15  # Epochs without C_td improvement before stopping
-    lr_projection_head: float = 1e-4   # BrainIAC projection head learning rate
-    lr_sequence_model: float = 5e-5    # Longformer/Mamba learning rate
-    lr_survival_head: float = 1e-3     # TraCeR head learning rate (small module, higher LR)
-    weight_decay: float = 0.01         # AdamW weight decay
-    grad_clip_max_norm: float = 1.0    # Gradient clipping threshold
+    max_epochs_stage1: int = 5 # LP-FT Stage 1: linear probing (head only)
+    max_epochs_stage2: int = 100 # LP-FT Stage 2: sequence model + head fine-tuning
+    early_stopping_patience: int = 15 # Epochs without C_td improvement before stopping
+    lr_projection_head: float = 1e-4 # BrainIAC projection head learning rate
+    lr_sequence_model: float = 5e-5 # Longformer/Mamba learning rate
+    lr_survival_head: float = 1e-3 # TraCeR head learning rate (small module, higher LR)
+    weight_decay: float = 0.01 # AdamW weight decay
+    grad_clip_max_norm: float = 1.0 # Gradient clipping threshold
 
 
     dvf_dir: Path = field(
@@ -203,4 +211,9 @@ class ModelConfig:
             raise ValueError(
                 f"grad_clip_max_norm must be positive, got "
                 f"{self.grad_clip_max_norm}"
+            )
+        if not (0.0 < self.mps_memory_fraction <= 1.0):
+            raise ValueError(
+                f"mps_memory_fraction must be in (0, 1], got "
+                f"{self.mps_memory_fraction}"
             )

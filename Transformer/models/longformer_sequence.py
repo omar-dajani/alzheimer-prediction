@@ -1,31 +1,32 @@
 """
-longformer_sequence — Longformer-based longitudinal sequence model for DVF token streams.
+longformer_sequence — Longformer-style longitudinal sequence model using
+PyTorch-native Scaled Dot Product Attention (SDPA) with sliding window masks.
 
 Pipeline position:
     Phase 3 of the ADNI Advanced Survival Pipeline. Receives the flattened spatial
     token sequence from Phase 1 (BrainIAC) and returns a contextualized sequence
     of the same shape for consumption by Phase 5 (PMA pooling).
-
 Inputs:
     x: [B, V * 512, d_model] — flat token sequence from BrainIAC extractor
-    time_deltas: [B, V] — inter-visit intervals in months (delta_t[0] = 0 for baseline)
+    time_deltas: [B, V] — inter-visit intervals in months (delta_t[0] = 0)
     missing_mask: [B, V] — 1 = visit present, 0 = missing or padded
 
 Outputs:
     [B, V * 512, d_model] — contextualized token sequence, same shape as input x.
 
 Architecture sequence (in forward() order):
-    1. validate_shapes()                      — runtime contract enforcement
-    2. Reshape x to [B, V, 512, d_model]      — restore visit structure for PE injection
-    3. ModalityDropout on content             — replace missing/dropped visits
-    4. Compute temporal PE via CTLPE          — [B, V, d_model] -> expand to [B, V, 512, d_model]
-    5. Add spatial PE                         — [512, d_model] broadcast across B and V
-    6. Flatten back to [B, V*512, d_model]    — Longformer expects flat sequence
-    7. Prepend V global separator tokens      — [B, V*512 + V, d_model]
-    8. Build global attention mask            — 1 at separator positions, 0 elsewhere
-    9. Run Longformer attention layers        — full sparse + global attention
-    10. Strip separator tokens                — restore [B, V*512, d_model]
-    11. validate output shape before return
+    1. validate_shapes() — runtime contract enforcement
+    2. Reshape x to [B, V, 512, d_model] — restore visit structure
+    3. ModalityDropout on content — replace missing/dropped visits
+    4. Compute temporal PE via CTLPE — [B, V, d_model]
+    5. Add spatial PE — [512, d_model] broadcast
+    6. Flatten back to [B, V*512, d_model] — attention expects flat sequence
+    7. Prepend V global separator tokens — [B, V*512 + V, d_model]
+    8. Build sliding window + global mask — boolean attn_mask for SDPA
+    9. Run SDPA transformer layers — native PyTorch attention
+    10. Strip separator tokens — restore [B, V*512, d_model]
+    11. Validate output shape before return
+
 """
 
 import logging
@@ -35,6 +36,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 import sys
@@ -56,37 +58,149 @@ NUM_HIDDEN_LAYERS = 6
 INTERMEDIATE_MULTIPLIER = 4
 
 
+def _build_sliding_window_mask(
+    seq_len: int,
+    window_size: int,
+    global_positions: list,
+    device: torch.device,
+) -> Tensor:
+    """Build a boolean attention mask with sliding window + global tokens.
+
+    Creates a [seq_len, seq_len] boolean mask where:
+        - True = ALLOW attention (can attend)
+        - False = BLOCK attention (masked out)
+    Within the sliding window, tokens can attend to neighbors within
+    ±(window_size // 2). Global positions can attend to ALL tokens
+    and ALL tokens can attend to global positions.
+
+    This replaces HuggingFace's Longformer attention implementation with
+    native PyTorch boolean masking compatible with SDPA on all backends
+    (MPS, CUDA, CPU).
+
+    Args:
+        seq_len: Total sequence length including separators.
+        window_size: Sliding window width (tokens attend to ±w/2).
+        global_positions: List of token indices with global attention.
+        device: Device for the output tensor.
+
+    Returns:
+        Boolean tensor [seq_len, seq_len] for use as attn_mask in SDPA.
+    """
+    # Start with no attention allowed
+    mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
+
+    # Sliding window: token i can attend to [i - w/2, i + w/2]
+    half_w = window_size // 2
+    for i in range(seq_len):
+        lo = max(0, i - half_w)
+        hi = min(seq_len, i + half_w + 1)
+        mask[i, lo:hi] = True
+
+    # Global positions: bidirectional attention to/from all tokens
+    for pos in global_positions:
+        mask[pos, :] = True # Global token attends to all
+        mask[:, pos] = True # All tokens attend to global token
+
+    return mask # [seq_len, seq_len]
+
+
+class SDPATransformerLayer(nn.Module):
+    """Single transformer layer using PyTorch-native SDPA.
+
+    Replaces HuggingFace LongformerLayer with a clean implementation that
+    works on MPS, CUDA, and CPU. Uses pre-norm (LayerNorm before attention
+    and FFN) for training stability with deep networks.
+
+    Args:
+        d_model: Model dimension.
+        n_heads: Number of attention heads.
+        d_ff: Feed-forward intermediate dimension.
+        dropout: Dropout probability.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        # Multi-head attention projections
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+        # Feed-forward network
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model),
+            nn.Dropout(dropout),
+        )
+
+        # Pre-norm LayerNorms
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.attn_dropout = nn.Dropout(dropout)
+
+    def forward(self, x: Tensor, attn_mask: Tensor) -> Tensor:
+        """Forward pass with masked SDPA attention.
+
+        Args:
+            x: Input tensor [B, N, d_model].
+            attn_mask: Boolean mask [N, N] (True = allow attention).
+
+        Returns:
+            Output tensor [B, N, d_model].
+        """
+        B, N, D = x.shape
+
+        # Pre-norm + multi-head attention
+        x_norm = self.norm1(x)
+        q = self.q_proj(x_norm).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x_norm).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x_norm).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
+        # q, k, v: [B, n_heads, N, head_dim]
+
+        # SDPA with boolean mask — hardware-accelerated on MPS and CUDA
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,  # [N, N] broadcast to [B, n_heads, N, N]
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+        )  # [B, n_heads, N, head_dim]
+
+        attn_out = attn_out.transpose(1, 2).reshape(B, N, D)
+        attn_out = self.out_proj(attn_out)
+        x = x + attn_out  # Residual
+
+        # Pre-norm + FFN
+        x = x + self.ffn(self.norm2(x))  # Residual
+
+        return x
+
+
 class LongformerSequence(BaseSequenceModel):
-    """Longformer-based sequence model for longitudinal DVF token streams.
+    """Longformer-style sequence model using native PyTorch SDPA.
 
     Processes a flattened multi-visit spatial token sequence using sparse
     sliding-window attention with global visit-separator tokens. Returns
     a contextualized sequence of the same shape for downstream PMA pooling.
 
-    Design rationale over alternatives:
-        - Standard Transformer: O(N^2) is infeasible for N=2560 with 128^3
-          volumetric inputs already consuming most GPU memory.
-        - Performer/LinFormer: approximate attention trades accuracy for
-          speed. Longformer's exact sparse attention is preferable when the
-          sparsity pattern (visit-aligned windows) has semantic meaning.
-        - Mamba (Phase 4): SSM-based, handles irregular time natively via
-          ZOH discretization. Longformer + CTLPE is the baseline; Mamba is
-          the upgrade path.
+    Phase 3/4 modernization:
+        Replaced HuggingFace LongformerModel with native PyTorch SDPA
+        (torch.nn.functional.scaled_dot_product_attention). The sliding
+        window sparsity is achieved via a boolean mask constructed natively.
 
     Window size strategy:
-        w = 512 = n_tokens_per_visit. This is not a coincidence — it ensures
-        every token can attend to every other token within its own visit
-        (full intra-visit attention). Cross-visit information flows
-        exclusively through global separator tokens, making the attention
-        pattern interpretable: window boundary = visit boundary.
-
-    Global separator tokens:
-        V learned separator tokens are prepended to the sequence before the
-        Longformer layers. These tokens have global attention (attend to all
-        N tokens bidirectionally), creating information bridges between
-        visits. A global token at visit boundary k enables 2-hop information
-        flow: Visit_1 -> Global -> Visit_V. Separators are stripped after
-        the Longformer layers to restore the original sequence shape.
+        w = 512 = n_tokens_per_visit. Every token can attend to every
+        other token within its own visit (full intra-visit attention).
+        Cross-visit information flows through global separator tokens.
 
     Tensor shapes:
         Input: x — [B, V * 512, d_model]
@@ -111,81 +225,40 @@ class LongformerSequence(BaseSequenceModel):
             config.d_model, config.n_tokens_per_visit
         )
 
-        # Visit-level modality dropout (shared component from base.py)
+        # Visit-level modality dropout 
         self.modality_dropout = ModalityDropout(config)
 
         # Global separator token embedding — one learned vector shared
-        # across all V separator positions. Separators are differentiated
-        # by their temporal PE (each gets the PE of its corresponding
-        # visit), not by their content embedding.
+        # across all V separator positions.
         self.separator_embedding = nn.Parameter(
             torch.randn(config.d_model) * 0.02
         )
 
-        # Longformer attention stack via HuggingFace
-        self._build_longformer(config)
+        # Native SDPA transformer stack (replaces HuggingFace Longformer)
+        d_ff = config.d_model * INTERMEDIATE_MULTIPLIER
+        self.layers = nn.ModuleList([
+            SDPATransformerLayer(
+                d_model=config.d_model,
+                n_heads=NUM_ATTENTION_HEADS,
+                d_ff=d_ff,
+                dropout=0.1,
+            )
+            for _ in range(NUM_HIDDEN_LAYERS)
+        ])
+
+        # Final LayerNorm (post-transformer normalization)
+        self.final_norm = nn.LayerNorm(config.d_model)
 
         self._config = config
+        self._window_size = config.longformer_window
 
-    def _build_longformer(self, config: ModelConfig) -> None:
-        """Build the HuggingFace Longformer attention stack.
-
-        Uses LongformerModel with custom configuration matching the
-        pipeline's d_model and attention window. The Longformer's own
-        positional embeddings are disabled (we inject CTLPE + spatial PE
-        externally), and the pooler is disabled.
-
-        Args:
-            config: ModelConfig providing d_model and longformer_window.
-        """
-        try:
-            from transformers import (
-                LongformerConfig,
-                LongformerModel,
-            )
-
-            longformer_config = LongformerConfig(
-                hidden_size=config.d_model,
-                num_attention_heads=NUM_ATTENTION_HEADS,
-                num_hidden_layers=NUM_HIDDEN_LAYERS,
-                intermediate_size=config.d_model * INTERMEDIATE_MULTIPLIER,
-                attention_window=[
-                    config.longformer_window
-                ] * NUM_HIDDEN_LAYERS,
-                # Must be large enough for max possible sequence length
-                # INCLUDING HF Longformer's automatic padding to multiples
-                # of attention_window. Without this, position IDs exceed the
-                # embedding table size.
-                # Raw length: v_max * (n_tokens_per_visit + 1_separator)
-                # Padded length: ceil(raw / window) * window
-                # +2 for HF padding_idx offset
-                max_position_embeddings=(
-                    math.ceil(
-                        config.v_max * (config.n_tokens_per_visit + 1)
-                        / config.longformer_window
-                    ) * config.longformer_window + 2
-                ),
-                # We handle positional encoding externally via CTLPE
-                # and SpatialSinusoidalPE — disable HuggingFace's
-                # internal position embeddings by zeroing them after init
-            )
-            self.longformer = LongformerModel(longformer_config)
-            # Zero out the internal positional embeddings — we use CTLPE
-            # and SpatialSinusoidalPE instead
-            self.longformer.embeddings.position_embeddings.weight.data.zero_()
-            self.longformer.embeddings.position_embeddings.weight.requires_grad = False
-            logger.info(
-                "Built HuggingFace LongformerModel (heads=%d, layers=%d, "
-                "window=%d).",
-                NUM_ATTENTION_HEADS,
-                NUM_HIDDEN_LAYERS,
-                config.longformer_window,
-            )
-        except ImportError:
-            raise ImportError(
-                "HuggingFace transformers is required for LongformerSequence. "
-                "Install via: pip install transformers"
-            )
+        logger.info(
+            "Built native SDPA LongformerSequence (heads=%d, layers=%d, "
+            "window=%d). No HuggingFace dependency.",
+            NUM_ATTENTION_HEADS,
+            NUM_HIDDEN_LAYERS,
+            config.longformer_window,
+        )
 
     def _build_global_attention_mask(
         self,
@@ -194,41 +267,35 @@ class LongformerSequence(BaseSequenceModel):
         n: int,
         device: torch.device,
     ) -> Tensor:
-        """Build the global attention mask for Longformer.
+        """Build SDPA boolean attention mask with sliding window + global tokens.
 
-        Creates a binary mask where separator token positions receive
-        value 1 (global attention — attends to all tokens bidirectionally)
-        and content token positions receive value 0 (local sliding-window
-        attention only).
-
-        Global tokens create 2-hop information paths between visits:
-        Visit_1 tokens -> Global_1 separator -> Visit_V tokens.
-        This is how cross-visit context propagates without every token
-        attending to the full sequence.
+        Creates a [total_len, total_len] boolean mask for SDPA where:
+            - True = ALLOW attention
+            - False = BLOCK attention
 
         Separator layout in the interleaved sequence:
-            [sep_0, tok_0..511, sep_1, tok_512..1023, sep_2, tok_1024..1535, ...]
+            [sep_0, tok_0..511, sep_1, tok_512..1023, ...]
         Separator positions: [0, 513, 1026, ...] — every (512 + 1)th position.
 
         Args:
-            batch_size: Batch size B.
+            batch_size: Batch size B (unused, mask is shared).
             v: Number of visits V.
             n: Number of content tokens (V * 512).
             device: Device for the output tensor.
 
         Returns:
-            Long tensor of shape [B, N + V] with 1 at separator positions
-            and 0 elsewhere.
+            Boolean tensor [total_len, total_len] for SDPA attn_mask.
         """
         total_len = n + v  # content tokens + separator tokens
-        mask = torch.zeros(
-            batch_size, total_len, dtype=torch.long, device=device
-        )  # [B, N + V]
-        # Separator positions: 0, 513, 1026, ... (every 512+1 tokens)
         sep_stride = self.n_tokens_per_visit + 1
         separator_positions = [i * sep_stride for i in range(v)]
-        mask[:, separator_positions] = 1
-        return mask
+
+        return _build_sliding_window_mask(
+            seq_len=total_len,
+            window_size=self._window_size,
+            global_positions=separator_positions,
+            device=device,
+        )
 
     def _interleave_separators(
         self,
@@ -305,11 +372,7 @@ class LongformerSequence(BaseSequenceModel):
         time_deltas: Tensor,
         missing_mask: Tensor,
     ) -> Tensor:
-        """Process flattened longitudinal token sequence through Longformer.
-
-        Follows the 11-step architecture sequence documented in the
-        module docstring. Each step has an inline comment showing the
-        tensor shape after that operation.
+        """Process flattened longitudinal token sequence through SDPA Longformer.
 
         Args:
             x: Flattened token sequence [B, V * 512, d_model].
@@ -323,8 +386,7 @@ class LongformerSequence(BaseSequenceModel):
             same shape as input x.
 
         Raises:
-            ValueError: If input shapes violate the contract (via
-                validate_shapes).
+            ValueError: If input shapes violate the contract.
             RuntimeError: If output shape does not match input shape.
         """
         # Step 1: Runtime contract enforcement
@@ -362,12 +424,12 @@ class LongformerSequence(BaseSequenceModel):
         spatial_pe = spatial_pe.unsqueeze(0).unsqueeze(0) # [1, 1, 512, d_model]
 
         # Additive injection: x = content + temporal_pe + spatial_pe
-        # This is the CTLPE injection method (Algorithm 1, arXiv:2409.20092)
+        # This is the CTLPE injection method
         x = x + temporal_pe_expanded + spatial_pe
         # x: [B, V, 512, d_model]
 
-        # Step 6: Flatten back to [B, V*512, d_model] for Longformer
-        x = x.reshape(b, n, self.d_model)  # [B, V*512, d_model]
+        # Step 6: Flatten back to [B, V*512, d_model] for attention
+        x = x.reshape(b, n, self.d_model) # [B, V*512, d_model]
 
         # Step 7: Prepare global separator tokens with temporal PE
         # Separator content is shared; temporal PE differentiates them
@@ -381,19 +443,16 @@ class LongformerSequence(BaseSequenceModel):
         x = self._interleave_separators(x, sep, v)
         # x: [B, V*513, d_model]
 
-        # Step 8: Build global attention mask
-        global_attention_mask = self._build_global_attention_mask(
+        # Step 8: Build SDPA boolean attention mask (sliding window + global)
+        attn_mask = self._build_global_attention_mask(
             b, v, n, x.device
-        )  # [B, V*513]
+        )  # [total_len, total_len]
 
-        # Step 9: Run Longformer attention layers
-        # inputs_embeds bypasses the embedding layer — we provide
-        # already-embedded tokens with our custom positional encoding
-        longformer_output = self.longformer(
-            inputs_embeds=x,
-            global_attention_mask=global_attention_mask,
-        )
-        x = longformer_output.last_hidden_state # [B, V*513, d_model]
+        # Step 9: Run native SDPA transformer layers
+        for layer in self.layers:
+            x = layer(x, attn_mask)
+        x = self.final_norm(x)
+        # x: [B, V*513, d_model]
 
         # Step 10: Strip separator tokens to restore content-only sequence
         x = self._strip_separators(x, v)
@@ -418,7 +477,7 @@ if __name__ == "__main__":
         format="%(levelname)s | %(name)s | %(message)s",
     )
 
-    print("Phase 3 — LongformerSequence Smoke Test")
+    print("Phase 3 — LongformerSequence (SDPA) Smoke Test")
 
     config = ModelConfig()
     pass_count = 0
@@ -428,7 +487,7 @@ if __name__ == "__main__":
     try:
         model = LongformerSequence(config)
         model.eval()
-        print("PASS: LongformerSequence instantiated")
+        print("PASS: LongformerSequence instantiated (native SDPA)")
         pass_count += 1
     except Exception as e:
         print(f"FAIL: LongformerSequence instantiation — {e}")
@@ -477,28 +536,23 @@ if __name__ == "__main__":
         print(f"FAIL: missing visit — {e}")
         fail_count += 1
 
-    # Test 5: Global attention mask
+    # Test 5: Sliding window + global attention mask
     try:
         mask = model._build_global_attention_mask(
             batch_size=2, v=3, n=1536, device=torch.device("cpu")
         )
-        assert mask.shape == (2, 1539), (
-            f"Mask shape: {mask.shape} != (2, 1539)"
+        total_len = 1536 + 3  # 1539
+        assert mask.shape == (total_len, total_len), (
+            f"Mask shape: {mask.shape} != ({total_len}, {total_len})"
         )
-        # Separator positions: 0, 513, 1026
-        assert mask[0, 0].item() == 1, "Position 0 should be global"
-        assert mask[0, 513].item() == 1, "Position 513 should be global"
-        assert mask[0, 1026].item() == 1, "Position 1026 should be global"
-        # Non-separator positions should be 0
-        assert mask[0, 1].item() == 0, "Position 1 should be local"
-        assert mask[0, 512].item() == 0, "Position 512 should be local"
-        assert mask[0, 514].item() == 0, "Position 514 should be local"
-        # Total global tokens should equal V
-        assert mask[0].sum().item() == 3, "Should have exactly V=3 global tokens"
-        print(f"PASS: global attention mask — shape {tuple(mask.shape)}")
+        # Separator positions: 0, 513, 1026 — should have global attention
+        assert mask[0, :].all(), "Position 0 (separator) should attend to all"
+        assert mask[:, 0].all(), "All should attend to position 0 (separator)"
+        assert mask[513, :].all(), "Position 513 (separator) should attend to all"
+        print(f"PASS: SDPA attention mask — shape {tuple(mask.shape)}")
         pass_count += 1
     except Exception as e:
-        print(f"FAIL: global attention mask — {e}")
+        print(f"FAIL: attention mask — {e}")
         fail_count += 1
 
     # Test 6: CTLPE output shape and linearity

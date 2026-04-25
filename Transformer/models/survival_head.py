@@ -1,12 +1,6 @@
 """
 survival_head — TraCeR competing-risks discrete hazard head for MCI->Dementia prediction.
 
-Pipeline position:
-    Phase 6 of the ADNI Advanced Survival Pipeline. Final model component.
-    Receives the PMA pooling summary [B, m * d_model] from Phase 5 and produces
-    cause-specific discrete hazard rates [B, K, G] consumed by the IPCW loss
-    (ipcw_loss.py) during training and by chi_interpolation.py at evaluation.
-
 Inputs:
     x: [B, d_input] — flattened PMA output, where d_input = pma.output_dim()
        For default config: d_input = 8 * 512 = 4096.
@@ -14,23 +8,13 @@ Inputs:
 Outputs:
     hazards: [B, K, G] — cause-specific discrete hazard rates after sigmoid
              and constraint enforcement. Each value in (0, 1).
-             K = n_risks = 2: cause 0 = MCI->Dementia, cause 1 = mortality
+             K = n_risks (default 1 for single-event dementia-only survival)
              G = n_grid  = 5: time intervals [0,12), [12,24), [24,36), [36,48), [48,60]
 
 Architecture:
     Shared trunk: Linear(d_input, 256) -> GELU -> Dropout(0.3) -> Linear(256, 128) -> GELU
     Per-cause nets: K x [Linear(128, 64) -> GELU -> Linear(64, G)]
     Post-processing: sigmoid -> total hazard constraint enforcement
-
-Critical implementation rule:
-    Output activation is sigmoid, NOT softmax. Softmax forces outputs to sum to 1
-    across time, implying the subject definitely experiences an event — wrong for
-    censored subjects. Sigmoid allows each hazard to be independently in (0, 1).
-    See TraCeR paper (arXiv:2512.18129) and SKILL_tracer_survival_head.md section 1.
-
-Competing risks motivation:
-    Framingham Study: ignoring competing non-dementia mortality inflates lifetime
-    AD risk from 6.3% to 25.5% — a 4x overestimate. Two-risk head is required.
 
 Inference helpers:
     hazards_to_survival(hazards) -> overall survival S(t_j) [B, G]
@@ -70,12 +54,18 @@ TRUNK_DROPOUT = 0.3
 # Cause-specific subnetwork constants
 CAUSE_HIDDEN = 64
 
+# Numerical stability — hazard bounds after sigmoid
+# Prevents log(0) in downstream IPCW loss and ensures constraint
+# enforcement doesn't produce exactly 0.0 or 1.0
+HAZARD_EPS = 1e-4
+HAZARD_MAX = 1.0 - HAZARD_EPS
+
 
 class TraCeRSurvivalHead(nn.Module):
     """TraCeR competing-risks discrete hazard head.
 
     Produces cause-specific discrete hazard rates from the PMA pooling
-    summary. Uses sigmoid activation (NOT softmax) to allow each hazard
+    summary. Uses sigmoid activation to allow each hazard
     to be independently bounded in (0, 1).
 
     Architecture:
@@ -102,7 +92,7 @@ class TraCeRSurvivalHead(nn.Module):
         Args:
             d_input: Dimension of PMA output vector. Passed explicitly
                 from pma.output_dim() to avoid hardcoded dependencies.
-            config: ModelConfig providing n_risks (K=2) and n_grid (G=5).
+            config: ModelConfig providing n_risks (default K=1) and n_grid (G=5).
         """
         super().__init__()
         self.n_risks = config.n_risks
@@ -136,8 +126,9 @@ class TraCeRSurvivalHead(nn.Module):
             x: PMA output [B, d_input].
 
         Returns:
-            Hazard rates [B, K, G] after sigmoid and constraint enforcement.
-            Each value is in (0, 1). Sum across K at each time point <= 1.
+            Hazard rates [B, K, G] after sigmoid, clamping, and
+            constraint enforcement. Each value is in [HAZARD_EPS, HAZARD_MAX].
+            Sum across K at each time point <= 1.
         """
         B = x.shape[0]
 
@@ -157,16 +148,23 @@ class TraCeRSurvivalHead(nn.Module):
         # softmax would force sum=1 across time, implying certain eventual event = wrong
         hazards = torch.sigmoid(hazard_logits)  # [B, K, G]
 
+        # Phase 5: Clamp to [eps, 1-eps] to prevent log(0) in IPCW loss
+        # and ensure constraint enforcement doesn't produce exact 0/1
+        hazards = hazards.clamp(min=HAZARD_EPS, max=HAZARD_MAX)
+
         # Total hazard constraint enforcement: sum_k h_k(t_j) <= 1
         # Rescale only when sum > 1 — preserves hazard magnitudes in the
         # normal operating range and only intervenes when violated
         total = hazards.sum(dim=1, keepdim=True) # [B, 1, G]
         scale = torch.where(
             total > 1.0,
-            1.0 / total,
+            1.0 / total.clamp(min=HAZARD_EPS),  # Prevent div by zero
             torch.ones_like(total),
         )
         hazards = hazards * scale # [B, K, G]
+
+        # Re-clamp after scaling (scaling can push below eps)
+        hazards = hazards.clamp(min=HAZARD_EPS, max=HAZARD_MAX)
 
         assert hazards.shape == (B, self.n_risks, self.n_grid), (
             f"Hazard shape mismatch: got {tuple(hazards.shape)}, "
@@ -184,6 +182,9 @@ class TraCeRSurvivalHead(nn.Module):
         The product is computed in log-space for numerical stability:
             log S(t_j) = sum_{l<=j} log(1 - sum_k h_k(t_l))
 
+        Phase 5 hardening: explicit eps prevents log(0) when total
+        hazard approaches 1.0 due to float32 precision.
+
         Args:
             hazards: Cause-specific hazard rates [B, K, G].
 
@@ -195,9 +196,7 @@ class TraCeRSurvivalHead(nn.Module):
         total_hazard = hazards.sum(dim=1)  # [B, G]
 
         # Clamp to [0, 1 - eps] to prevent log(0) or log(negative)
-        # Float32 precision can cause total_hazard to be 1 + ~1e-7
-        # even after constraint enforcement, making 1 - total_hazard < 0
-        total_hazard = total_hazard.clamp(max=1.0 - 1e-7)
+        total_hazard = total_hazard.clamp(max=1.0 - HAZARD_EPS)
 
         # Log-product form for numerical stability
         log_surv = torch.log(
@@ -213,12 +212,6 @@ class TraCeRSurvivalHead(nn.Module):
             F_k(t_j) = sum_{l<=j} h_k(t_l) * S(t_{l-1})
 
         where S(t_0) = 1.0 by definition (everyone at risk at time 0).
-
-        Clinicians want CIF for dementia (cause k=0), not S(t).
-        S(t) measures overall survival from all causes — it includes
-        mortality as a censoring mechanism. CIF correctly isolates the
-        probability of dementia conversion while accounting for the
-        competing mortality risk.
 
         Args:
             hazards: Cause-specific hazard rates [B, K, G].
@@ -277,8 +270,9 @@ if __name__ == "__main__":
         x = torch.randn(4, d_input)  # B=4 subjects
         with torch.no_grad():
             hazards = head(x)
-        assert hazards.shape == (4, 2, 5), (
-            f"Shape: {hazards.shape} != (4, 2, 5)"
+        expected_shape = (4, config.n_risks, config.n_grid)
+        assert hazards.shape == expected_shape, (
+            f"Shape: {hazards.shape} != {expected_shape}"
         )
         print(f"PASS: forward shape — {tuple(hazards.shape)}")
         pass_count += 1
@@ -343,7 +337,8 @@ if __name__ == "__main__":
     # Test 8: CIF shape
     try:
         cif = head.hazards_to_cif(hazards)
-        assert cif.shape == (4, 2, 5), f"CIF shape: {cif.shape}"
+        expected_cif_shape = (4, config.n_risks, config.n_grid)
+        assert cif.shape == expected_cif_shape, f"CIF shape: {cif.shape} != {expected_cif_shape}"
         print(f"PASS: CIF shape — {tuple(cif.shape)}")
         pass_count += 1
     except Exception as e:

@@ -1,35 +1,29 @@
 """
 mamba_sequence — Dt-Mamba3D selective state-space sequence model for DVF token streams.
 
-Pipeline position:
-    Phase 4 of the ADNI Advanced Survival Pipeline. Drop-in alternative to
-    LongformerSequence (Phase 3). Implements the same BaseSequenceModel interface
-    and produces identically shaped outputs. Swap by passing Mamba3DSequence
-    instead of LongformerSequence to ADNISurvivalPipeline (Phase 9).
-
 Inputs:
-    x:            [B, V * 512, d_model] — flat token sequence from BrainIAC extractor
-    time_deltas:  [B, V] — inter-visit intervals in months (0 for baseline visit)
+    x: [B, V * 512, d_model] — flat token sequence from BrainIAC extractor
+    time_deltas: [B, V] — inter-visit intervals in months (0 for baseline visit)
     missing_mask: [B, V] — 1 = visit present, 0 = missing or padded
 
 Outputs:
     [B, V * 512, d_model] — contextualized token sequence, same shape as input x.
 
 Architecture sequence (in forward() order):
-    1.  validate_shapes()
-    2.  Expand time_deltas [B, V] -> dt_tokens [B, N] (repeat each delta for 512 tokens)
-    3.  Input projection: x [B, N, d_model] -> xz [B, N, 2 * d_inner]
-    4.  Split xz into x_ssm [B, N, d_inner] and z (gate) [B, N, d_inner]
-    5.  Depthwise conv1d for local context, then SiLU activation
-    6.  Selective projections: B_sel, C_sel from x_proj
-    7.  Dt-aware discretization: delta = softplus(dt_proj(x_ssm)) * dt_tokens
-    8.  Compute A_bar = exp(A * delta), B_bar = delta * B_sel (ZOH + Euler)
-    9.  Selective scan (CUDA kernel or PyTorch fallback)
+    1. validate_shapes()
+    2. Expand time_deltas [B, V] -> dt_tokens [B, N] (repeat each delta for 512 tokens)
+    3. Input projection: x [B, N, d_model] -> xz [B, N, 2 * d_inner]
+    4. Split xz into x_ssm [B, N, d_inner] and z (gate) [B, N, d_inner]
+    5. Depthwise conv1d for local context, then SiLU activation
+    6. Selective projections: B_sel, C_sel from x_proj
+    7. Dt-aware discretization: delta = softplus(dt_proj(x_ssm)) * dt_tokens
+    8. Compute A_bar = exp(A * delta), B_bar = delta * B_sel (ZOH + Euler)
+    9. Selective scan (CUDA kernel or PyTorch fallback)
     10. Output gating: y * SiLU(z)
     11. Output projection: [B, N, d_inner] -> [B, N, d_model]
-    12. validate output shape before return
+    12. Validate output shape before return
 
-Key advantage over Longformer (Phase 3):
+Key advantage over Longformer:
     Clinical time is encoded in the SSM physics (steps 7-8), not via a separate
     positional encoding layer. Longer inter-visit gaps produce proportionally more
     state forgetting via exp(A * delta) -> 0 as delta increases. Missing visits are
@@ -38,11 +32,6 @@ Key advantage over Longformer (Phase 3):
 No explicit positional encoding:
     This module does NOT import or use CTLPE or SpatialSinusoidalPE. The absence
     of explicit PE is intentional and is a design advantage, not an omission.
-
-Dependencies:
-    - Transformer/models/base.py (BaseSequenceModel)
-    - Transformer/config/model_config.py
-    - mamba_ssm package (CUDA) OR internal PyTorch fallback (CPU)
 """
 
 import logging
@@ -64,7 +53,7 @@ from Transformer.models.base import BaseSequenceModel
 
 logger = logging.getLogger(__name__)
 
-# Mamba architecture constants (from Gu & Dao, 2023)
+# Mamba architecture constants
 MAMBA_D_CONV = 4 # Depthwise conv kernel size — local context window
 MAMBA_DT_RANK_DIVISOR = 16 # dt_rank = d_model // MAMBA_DT_RANK_DIVISOR
 
@@ -74,8 +63,12 @@ def _try_import_mamba_ssm():
 
     The mamba_ssm package provides a fused CUDA kernel for the parallel
     associative scan that underpins Mamba's O(N) complexity. If the
-    package is unavailable (CPU-only environment, Apple Silicon, etc.),
-    we fall back to a sequential pure-PyTorch implementation.
+    package is unavailable, we fall back to a sequential pure-PyTorch implementation.
+
+    The conv1d in this module uses nn.Conv1d (pure PyTorch) - NOT
+    the mamba_ssm causal_conv1d_fwd CUDA kernel. So local context
+    extraction works on MPS/CPU without any changes.
+    Only the selective scan dispatch needs guarding.
 
     Returns:
         Tuple of (available: bool, scan_fn: callable or None).
@@ -200,16 +193,9 @@ class Mamba3DSequence(BaseSequenceModel):
     ) -> Tensor:
         """Process flattened longitudinal token sequence through Mamba SSM.
 
-        Follows the 12-step architecture sequence documented in the module
-        docstring. Clinical time is encoded directly in the SSM discretization
-        step (step 7) — no explicit positional encoding is used.
-
         Missing visits are handled implicitly: the missing visit's time gap
         is absorbed into a larger dt value for the next present visit.
         The SSM state decays proportionally (exp(A * large_dt) -> 0).
-        This is a fundamental advantage over the Longformer, which requires
-        ModalityDropout and learned default embeddings.
-
         This module does NOT use CTLPE or SpatialSinusoidalPE. The absence
         of explicit positional encoding is intentional.
 
@@ -349,6 +335,8 @@ class Mamba3DSequence(BaseSequenceModel):
             SSM output [B, N, d_inner].
         """
         if MAMBA_SSM_AVAILABLE and u.is_cuda:
+            # CUDA-only: use the fused mamba_ssm parallel scan kernel.
+            # This path is NEVER taken on MPS or CPU.
             return _selective_scan_fn(
                 u.contiguous(),
                 delta.contiguous(),
@@ -360,6 +348,7 @@ class Mamba3DSequence(BaseSequenceModel):
                 None, # delta_bias
                 True, # delta_softplus already applied
             )
+        # MPS / CPU: pure PyTorch sequential scan (no CUDA dependency)
         return self._sequential_scan_fallback(u, delta, A, B, C)
 
     def _sequential_scan_fallback(
