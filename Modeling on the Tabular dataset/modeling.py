@@ -209,7 +209,8 @@ def horizon_aucs(X_imp, y_event, y_duration, train_predict_fn, horizons=HORIZONS
 
 
 def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
-                     n_trials=40, seed=RANDOM_SEED):
+                     n_trials=40, seed=RANDOM_SEED,
+                     lr_range=(0.005, 0.20)):
     """
     Train and tune a scikit-survival GradientBoostingSurvivalAnalysis model
     using Optuna Bayesian hyperparameter optimization and stratified
@@ -222,7 +223,7 @@ def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
     censoring estimator.
 
     Search space (expanded vs. previous):
-        learning_rate     [0.005, 0.20]   log-uniform
+        learning_rate     lr_range        log-uniform (default [0.005, 0.20])
         n_estimators      [100, 800]      step 50
         max_depth         [1, 6]
         min_samples_split [2, 30]
@@ -238,6 +239,9 @@ def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
         label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
         n_trials (int): Number of Optuna hyperparameter search trials. Default 40.
         seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+        lr_range (tuple): (low, high) bounds for learning_rate search.
+            Default (0.005, 0.20). Pass (0.005, 0.05) for CN cohort where
+            learning_rate dominates and a narrower range improves convergence.
 
     Returns:
         tuple:
@@ -275,7 +279,7 @@ def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
     def objective(trial):
         params = dict(
             loss='coxph',
-            learning_rate=trial.suggest_float('learning_rate', 0.005, 0.20, log=True),
+            learning_rate=trial.suggest_float('learning_rate', lr_range[0], lr_range[1], log=True),
             n_estimators=trial.suggest_int('n_estimators', 100, 800, step=50),
             max_depth=trial.suggest_int('max_depth', 1, 6),
             min_samples_split=trial.suggest_int('min_samples_split', 2, 30),
@@ -325,7 +329,8 @@ def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
     return c, imp, final_model, study
 
 def run_deepsurv(X_imp, y_event, y_duration, label,
-                  n_trials=25, seed=RANDOM_SEED):
+                  n_trials=25, seed=RANDOM_SEED,
+                  dropout_range=(0.05, 0.50)):
     """
     Train and tune a DeepSurv (neural Cox PH) model using pycox and torchtuples,
     with Optuna hyperparameter optimization over architecture and training params.
@@ -336,9 +341,9 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
 
     Search space (expanded vs. previous):
         hidden    6 MLP architectures: [32,32] up to [256,256,128]
-        dropout   [0.05, 0.50]
-        lr        [5e-5, 5e-2]   log-uniform
-        wd        [1e-5, 1e-2]   log-uniform  (decoupled weight decay)
+        dropout   dropout_range        (default [0.05, 0.50])
+        lr        [5e-5, 5e-2]         log-uniform
+        wd        [1e-5, 1e-2]         log-uniform (decoupled weight decay)
         batch     {32, 64, 128, 256}
 
     Args:
@@ -348,6 +353,9 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
         label (str): Cohort label for progress printing (e.g. 'MCI->Dementia').
         n_trials (int): Number of Optuna hyperparameter search trials. Default 25.
         seed (int): Random seed for reproducibility. Default RANDOM_SEED.
+        dropout_range (tuple): (low, high) bounds for dropout search.
+            Default (0.05, 0.50). Pass (0.30, 0.60) for CN cohort where
+            dropout dominates importance and overfitting is severe.
 
     Returns:
         tuple:
@@ -380,7 +388,7 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
     def objective(trial):
         arch_idx = trial.suggest_categorical('arch_idx', list(range(len(ARCH_OPTIONS))))
         hidden   = ARCH_OPTIONS[arch_idx]
-        dropout  = trial.suggest_float('dropout', 0.05, 0.50)
+        dropout  = trial.suggest_float('dropout', dropout_range[0], dropout_range[1])
         lr       = trial.suggest_float('lr', 5e-5, 5e-2, log=True)
         wd       = trial.suggest_float('wd', 1e-5, 1e-2, log=True)
         batch_sz = trial.suggest_categorical('batch', [32, 64, 128, 256])
