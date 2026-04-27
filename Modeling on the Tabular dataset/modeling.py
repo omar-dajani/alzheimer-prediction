@@ -261,7 +261,6 @@ def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
         """Build a pycox EvalSurv object and return Antolini's C-index."""
         time_grid   = surv_funcs[0].x
         surv_matrix = np.row_stack([fn(time_grid) for fn in surv_funcs]).T
-        # surv_matrix shape: (n_times, n_subjects) — pycox convention
         ev = EvalSurv(
             surv=pd.DataFrame(surv_matrix, index=time_grid),
             durations=durations,
@@ -293,7 +292,6 @@ def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
         for tr, va in skf.split(X_imp, y_event):
             model = GradientBoostingSurvivalAnalysis(**params)
             model.fit(X_imp.iloc[tr], y_struct[tr])
-
             surv_funcs = model.predict_survival_function(X_imp.iloc[va])
             c_stat = get_antolini_c(surv_funcs, y_duration[va], y_event[va])
             cs.append(c_stat)
@@ -310,7 +308,6 @@ def gbsa_survival_cv(X_imp, y_event, y_duration, feature_names, label,
     best = study.best_params
     print(f'  [{label}] GBSA best Antolini-C: {study.best_value:.4f} | params: {best}')
 
-    # Refit final model on all data
     final_model = GradientBoostingSurvivalAnalysis(
         loss='coxph',
         random_state=seed,
@@ -423,7 +420,6 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
     print(f'  [{label}] DeepSurv best C-td: {study.best_value:.4f} | {best}')
 
     # ── Final refit with loss history capture ────────────────────────────────
-    # Use a stratified 80/20 split so val event rate matches training event rate.
     from sklearn.model_selection import train_test_split as _tts
     idx = np.arange(len(X_scaled))
     idx_tr, idx_va = _tts(idx, test_size=0.20, stratify=y_event, random_state=seed)
@@ -446,7 +442,6 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
         verbose=False,
     )
 
-    # Extract per-epoch loss from the pycox training log
     loss_history = {'train': [], 'val': []}
     try:
         log_df = log.to_pandas() if hasattr(log, 'to_pandas') else log
@@ -456,7 +451,7 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
             if 'val_loss' in log_df.columns:
                 loss_history['val'] = log_df['val_loss'].dropna().tolist()
     except Exception:
-        pass  # loss history is diagnostic-only; don't break training
+        pass
 
     final.compute_baseline_hazards()
     return study.best_value, final, scaler, loss_history, study
@@ -576,7 +571,9 @@ def run_cox_ph(X_imp, y_event, y_duration, label, n_trials=30, seed=RANDOM_SEED)
  
     def objective(trial):
         penalizer = trial.suggest_float('penalizer', 1e-3, 10.0, log=True)
-        l1_ratio  = trial.suggest_float('l1_ratio', 0.0, 1.0)
+        # Cap l1_ratio at 0.8 — pure lasso (1.0) collapses all coefficients to
+        # zero on high-dimensional survival data, producing C=0.5 or lower.
+        l1_ratio  = trial.suggest_float('l1_ratio', 0.0, 0.8)
         fold_cs = []
         for tr, va in skf.split(X_scaled, y_event):
             with warnings.catch_warnings():
@@ -588,13 +585,20 @@ def run_cox_ph(X_imp, y_event, y_duration, label, n_trials=30, seed=RANDOM_SEED)
                     val_df['_duration'] = y_duration[va]
                     val_df['_event'] = y_event[va].astype(int)
                     c = fitter.score(val_df, scoring_method='concordance_index')
+                    # Floor near-random scores so collapsed trials don't poison
+                    # the TPE surrogate model with misleadingly low objectives.
+                    if c < 0.45:
+                        c = 0.0
                 except Exception:
                     c = 0.0
             fold_cs.append(c)
         return np.mean(fold_cs)
- 
+
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction='maximize')
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=seed),
+    )
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
     best = study.best_params
     print(f'  [{label}] CoxPH best CV C: {study.best_value:.4f} | params: {best}')
