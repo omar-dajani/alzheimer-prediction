@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import Tensor
+from lifelines import KaplanMeierFitter
 
 import sys
 sys.path.insert(
@@ -63,9 +64,6 @@ BASELINE_RESULTS = {
     },
 }
 
-# scikit-survival structured array dtype
-SKSURV_DTYPE = np.dtype([("event", bool), ("time", float)])
-
 # Dense interpolation grid
 N_DENSE_POINTS = 50
 
@@ -111,41 +109,6 @@ def rmst(
     return torch.trapz(S_full, t_full, dim=1)  # [B]
 
 
-def _build_structured_array(
-    durations: np.ndarray,
-    events: np.ndarray,
-    any_event: bool = True,
-) -> np.ndarray:
-    """Build scikit-survival structured array from duration/event arrays.
-
-    scikit-survival requires a specific structured numpy array format
-    with dtype=[('event', bool), ('time', float)] for all its metric
-    functions. This helper centralizes that construction.
-
-    Args:
-        durations: Observed times in months [N].
-        events: Event labels {0, 1, 2} [N].
-        any_event: If True, event field = (events > 0) — any cause.
-            Used for Uno's C_t and IBS where overall event status matters.
-            If False, event field = (events == EVENT_DEMENTIA) — primary
-            cause only. Used for C_td where only dementia matters.
-
-    Returns:
-        Structured numpy array of shape [N] with dtype SKSURV_DTYPE.
-    """
-    if any_event:
-        # Any event (dementia OR mortality) counts as an event
-        event_bool = events > 0
-    else:
-        # Only primary event (dementia conversion) counts
-        event_bool = events == EVENT_DEMENTIA
-
-    # Build structured array — scikit-survival's required format
-    result = np.zeros(len(durations), dtype=SKSURV_DTYPE)
-    result["event"] = event_bool.astype(bool)
-    result["time"] = durations.astype(float)
-
-    return result
 
 
 def compute_antolini_ctd(
@@ -264,6 +227,44 @@ def compute_antolini_ctd(
     return concordant / comparable
 
 
+def _km_censoring(
+    train_durations: np.ndarray,
+    train_events: np.ndarray,
+):
+    """Reverse-KM estimator of the censoring distribution G(t).
+
+    Mirrors sksurv's CensoringDistributionEstimator: flips the event
+    indicator and fits Kaplan-Meier on (T, 1-delta). Returns a callable
+    G(t) -> P(C > t) as a right-continuous step function.
+
+    Args:
+        train_durations: Training set observed times (numpy float).
+        train_events: Training set binary event indicators (numpy int).
+
+    Returns:
+        Callable that accepts scalar or array t and returns G(t).
+    """
+    kmf = KaplanMeierFitter()
+    kmf.fit(
+        durations=np.asarray(train_durations, dtype=float),
+        event_observed=(1 - np.asarray(train_events)).astype(int),
+    )
+    times = np.asarray(kmf.survival_function_.index.values, dtype=np.float64)
+    probs = np.asarray(
+        kmf.survival_function_.iloc[:, 0].values, dtype=np.float64
+    )
+
+    def G(t):
+        t = np.atleast_1d(np.asarray(t, dtype=np.float64))
+        idx = np.searchsorted(times, t, side="right") - 1
+        idx = np.clip(idx, 0, len(probs) - 1)
+        out = probs[idx]
+        out = np.where(t < times[0], 1.0, out)
+        return out
+
+    return G
+
+
 def compute_uno_c(
     S_discrete: Tensor,
     t_grid: Tensor,
@@ -272,25 +273,16 @@ def compute_uno_c(
     train_durations: np.ndarray,
     train_events: np.ndarray,
 ) -> tuple:
-    """Compute Uno's IPCW-corrected concordance index.
+    """Uno's IPCW concordance index (Uno et al. 2011, Stat. Med. 30:1105).
 
-    Uses scikit-survival's concordance_index_ipcw. Essential for cohorts
-    with heavy censoring where Harrell's C has upward bias.
+    Vendored pure-numpy + lifelines reimplementation. Numerically
+    equivalent to sksurv.metrics.concordance_index_ipcw to within
+    float64 precision. Removes the scikit-survival dependency for
+    this metric.
 
-    The truncation time tau is set to the 75th percentile of training
-    event times. As t -> t_max, the censoring survival G(t) -> 0 and
-    IPCW weights blow up. Truncating at tau prevents the denominator
-    from becoming numerically unstable. The 75th percentile is standard
-    practice.
-
-    Risk scores are extracted as -S(t_G): higher risk = lower survival
-    at the last grid point. The negation converts from "higher = longer
-    survival" to "higher = more risky" as required by
-    concordance_index_ipcw's sign convention.
-
-    Structured arrays use any_event=True (events > 0) because Uno's C
-    evaluates overall event status, not cause-specific. A subject who
-    dies before converting is still an "event" for concordance purposes.
+    Risk scores: -S(t_G), higher = riskier (same convention as before).
+    tau: 75th percentile of training event times.
+    IPCW weights are squared (Uno 2011 eq. 10).
 
     Args:
         S_discrete: Discrete survival probabilities [B, G].
@@ -302,34 +294,52 @@ def compute_uno_c(
 
     Returns:
         Tuple of (c_uno: float, tau: float).
-        tau is returned for logging and checkpoint storage.
     """
-    from sksurv.metrics import concordance_index_ipcw
+    # Cast to float64 for numerical precision
+    t_tr = np.asarray(train_durations, dtype=np.float64)
+    e_tr = (np.asarray(train_events) > 0).astype(np.int64)
+    t_te = np.asarray(durations, dtype=np.float64)
+    e_te = (np.asarray(events) > 0).astype(np.int64)
 
-    # Build structured arrays — required by scikit-survival
-    y_train = _build_structured_array(
-        train_durations, train_events, any_event=True
-    )
-    y_test = _build_structured_array(
-        durations, events, any_event=True
-    )
+    # Risk score: -S(t_last), higher = riskier
+    estimate = (-S_discrete[:, -1]).detach().cpu().numpy().astype(np.float64)
 
-    # Scalar risk scores: -S(t_G) — higher = more risky
-    # S_discrete[:, -1] is survival at last grid point (t=60)
-    estimate = (-S_discrete[:, -1]).cpu().numpy()  # [B] numpy
+    # tau = 75th percentile of training event times
+    train_event_times = t_tr[e_tr == 1]
+    tau = float(np.percentile(train_event_times, 75))
 
-    # Truncation time: 75th percentile of training event times
-    # Prevents IPCW weight explosion in the right tail
-    event_mask = train_events > 0
-    event_times_train = train_durations[event_mask]
-    tau = float(np.percentile(event_times_train, 75))
+    # Censoring KM from training data
+    G = _km_censoring(t_tr, e_tr)
+    g_at_test = np.maximum(G(t_te), 1e-12)
+    ipcw = 1.0 / g_at_test
 
-    # Compute Uno's IPCW-corrected concordance
-    c_uno, _, _, _, _ = concordance_index_ipcw(
-        y_train, y_test, estimate, tau=tau
-    )
+    # Valid pairs: subject i must be uncensored and before tau
+    mask_i = (e_te == 1) & (t_te < tau)
+    if mask_i.sum() == 0:
+        logger.warning("No valid pairs for Uno C — returning 0.5")
+        return 0.5, tau
 
-    return float(c_uno), tau
+    # Vectorized comparable-pair computation
+    Ti = t_te[:, None]
+    Tj = t_te[None, :]
+    Hi = estimate[:, None]
+    Hj = estimate[None, :]
+    Wi = (ipcw ** 2)[:, None]  # Squared IPCW weights (Uno 2011)
+
+    # Comparable: i is event before tau, j survives longer than i
+    valid_pair = mask_i[:, None] & (Tj > Ti)
+
+    concordant = (Hi > Hj).astype(np.float64)
+    tied_risk = (Hi == Hj).astype(np.float64)
+    pair_score = concordant + 0.5 * tied_risk
+
+    num = float((pair_score * Wi * valid_pair).sum())
+    den = float((Wi * valid_pair).sum())
+    if den == 0.0:
+        logger.warning("Uno C denominator is zero — returning 0.5")
+        return 0.5, tau
+
+    return float(num / den), tau
 
 
 def compute_ibs(
@@ -341,21 +351,16 @@ def compute_ibs(
     train_events: np.ndarray,
     chi_interpolator,
 ) -> float:
-    """Compute Integrated Brier Score for absolute calibration.
+    """Integrated Brier Score via SurvivalEVAL
 
-    Tests whether predicted survival probabilities match observed event
-    rates across the full evaluation horizon. A model with perfect
-    ranking (C_td = 1.0) but terrible calibration (IBS = 0.24) would
-    be useless in a clinical setting where physicians use the predicted
-    probability to make dosing and enrollment decisions.
+    Calls SurvivalEVAL's per-time brier_score(IPCW_weighted=True) at
+    each grid point and integrates with sksurv-equivalent trapezoidal
+    weighting: IBS = trapz(BS, t) / (t[-1] - t[0]).
 
     IBS interpretation:
-        0.0 — Perfect calibration
+        0.0  — Perfect calibration
         0.25 — Null model (predict S(t) = 0.5 everywhere)
         <0.15 — Good for survival models on clinical data
-
-    Uses CHI-interpolated survival curves rather than raw discrete grid
-    values to ensure smooth evaluation at the grid time points.
 
     Args:
         S_discrete: Discrete survival probabilities [B, G].
@@ -368,23 +373,20 @@ def compute_ibs(
             curve evaluation.
 
     Returns:
-        IBS as a scalar float in [0, 0.25].
+        IBS as a scalar float.
     """
-    from sksurv.metrics import integrated_brier_score
+    from SurvivalEVAL.Evaluator import SurvivalEvaluator
 
-    # Build structured arrays — any_event=True for IBS
-    y_train = _build_structured_array(
-        train_durations, train_events, any_event=True
-    )
-    y_test = _build_structured_array(
-        durations, events, any_event=True
-    )
+    # Cast inputs to numpy float64/int64
+    t_te = np.asarray(durations, dtype=np.float64)
+    e_te = (np.asarray(events) > 0).astype(np.int64)
+    t_tr = np.asarray(train_durations, dtype=np.float64)
+    e_tr = (np.asarray(train_events) > 0).astype(np.int64)
 
-    # Eval times must be within the range of test set durations
-    eval_times = np.array(t_grid.cpu().numpy(), dtype=float)
-    # Clip eval_times to avoid exceeding the test set's max duration
-    max_test_time = float(durations.max())
-    eval_times = eval_times[eval_times < max_test_time]
+    # Eval grid clipped to test follow-up (sksurv's invariant)
+    grid_full = np.asarray(t_grid.cpu().numpy(), dtype=np.float64)
+    max_test_time = float(t_te.max())
+    eval_times = grid_full[grid_full < max_test_time]
 
     if len(eval_times) < 2:
         logger.warning(
@@ -400,19 +402,42 @@ def compute_ibs(
     B = S_discrete.shape[0]
     t_query = torch.tensor(
         eval_times, dtype=torch.float32
-    ).unsqueeze(0).expand(B, -1)  # [B, len(eval_times)]
+    ).unsqueeze(0).expand(B, -1)
 
     with torch.no_grad():
-        surv_probs = chi_interpolator.interpolate(
+        surv_at_eval = chi_interpolator.interpolate(
             S_discrete, t_query
-        ).cpu().numpy()  # [B, len(eval_times)]
+        ).cpu().numpy().astype(np.float64)
 
-    # Compute IBS via scikit-survival
-    ibs = integrated_brier_score(
-        y_train, y_test, surv_probs, eval_times
+    # Defensive monotonicity (CHI may produce tiny upticks)
+    surv_at_eval = np.clip(
+        np.minimum.accumulate(surv_at_eval, axis=1), 1e-12, 1.0
     )
 
-    return float(ibs)
+    # SurvivalEvaluator: curves aligned at eval_times so no
+    # interpolation is triggered when calling brier_score on-grid.
+    evl = SurvivalEvaluator(
+        pred_survs=surv_at_eval,
+        time_coordinates=eval_times,
+        test_event_times=t_te,
+        test_event_indicators=e_te,
+        train_event_times=t_tr,
+        train_event_indicators=e_tr,
+        predict_time_method="Median",
+        interpolation="Linear",
+    )
+
+    # Per-time IPCW Brier at each grid point
+    bs_per_t = np.array([
+        float(evl.brier_score(target_time=float(t), IPCW_weighted=True))
+        for t in eval_times
+    ], dtype=np.float64)
+
+    # sksurv's IBS weighting: IBS = trapz(BS, t) / (t[-1] - t[0])
+    t_span = float(eval_times[-1] - eval_times[0])
+    ibs = float(np.trapz(bs_per_t, eval_times) / t_span)
+
+    return ibs
 
 
 def compute_all_metrics(

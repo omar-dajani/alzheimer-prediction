@@ -141,13 +141,14 @@ class LPFTTrainer:
                 )
         # else: CPU / unknown — stays at float32.
 
-        # GradScaler: CUDA only
-        if self._amp_enabled and self._amp_device_type == "cuda":
+        # GradScaler: CUDA and MPS (torch >= 2.5 for MPS support)
+        if self._amp_enabled:
             try:
                 self.scaler = torch.amp.GradScaler(
-                    device="cuda", enabled=True,
+                    device=self._amp_device_type, enabled=True,
                 )
             except TypeError:
+                # Fallback for very old torch without device= kwarg
                 from torch.cuda.amp import GradScaler as _CudaScaler
                 self.scaler = _CudaScaler(enabled=True)
         else:

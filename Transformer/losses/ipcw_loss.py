@@ -224,7 +224,7 @@ def ipcw_survival_loss(
     log_surv = torch.log(1.0 - total_hazard).cumsum(dim=1)  # [B, G]
 
     # Interval index per subject
-    interval_idx = torch.bucketize(durations, t_grid) - 1  # [B]
+    interval_idx = torch.bucketize(durations, t_grid)  # [B]
     interval_idx = interval_idx.clamp(0, G - 1)
 
     # IPCW weights
