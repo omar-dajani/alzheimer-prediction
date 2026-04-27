@@ -570,10 +570,10 @@ def run_cox_ph(X_imp, y_event, y_duration, label, n_trials=30, seed=RANDOM_SEED)
         return fitter
  
     def objective(trial):
-        penalizer = trial.suggest_float('penalizer', 1e-3, 10.0, log=True)
-        # Cap l1_ratio at 0.8 — pure lasso (1.0) collapses all coefficients to
-        # zero on high-dimensional survival data, producing C=0.5 or lower.
-        l1_ratio  = trial.suggest_float('l1_ratio', 0.0, 0.8)
+        penalizer = trial.suggest_float('penalizer', 0.1, 10.0, log=True)
+        # Cap l1_ratio at 0.5 — pure/near-pure lasso collapses all coefficients
+        # to zero on high-dimensional survival data, producing C=0 downstream.
+        l1_ratio  = trial.suggest_float('l1_ratio', 0.0, 0.5)
         fold_cs = []
         for tr, va in skf.split(X_scaled, y_event):
             with warnings.catch_warnings():
@@ -581,19 +581,25 @@ def run_cox_ph(X_imp, y_event, y_duration, label, n_trials=30, seed=RANDOM_SEED)
                 try:
                     fitter = _fit(X_scaled.iloc[tr], y_event[tr], y_duration[tr],
                                   penalizer, l1_ratio)
+                    # Detect coefficient collapse — all-zero coefs produce identical
+                    # survival curves and zero comparable pairs in concordance_td.
+                    coefs = fitter.params_.values
+                    if np.all(np.abs(coefs) < 1e-6):
+                        fold_cs.append(0.0)
+                        continue
                     val_df = X_scaled.iloc[va].copy()
                     val_df['_duration'] = y_duration[va]
                     val_df['_event'] = y_event[va].astype(int)
                     c = fitter.score(val_df, scoring_method='concordance_index')
                     # Floor near-random scores so collapsed trials don't poison
-                    # the TPE surrogate model with misleadingly low objectives.
+                    # the TPE surrogate model.
                     if c < 0.45:
                         c = 0.0
                 except Exception:
                     c = 0.0
-            fold_cs.append(c)
+                fold_cs.append(c)
         return np.mean(fold_cs)
-
+ 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(
         direction='maximize',
