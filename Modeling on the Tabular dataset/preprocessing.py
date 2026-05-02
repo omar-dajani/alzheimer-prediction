@@ -16,9 +16,46 @@ from config import RANDOM_SEED, N_FOLDS, HORIZONS, FIG_DIR, CHECKPOINT_DIR, OUT_
 
 def classify_reverters(df_all, from_state='MCI', to_state='CN'):
     """
-    Classify MCI patients who reverted to CN into four trajectory groups
-    (progressor, transient_noise, sustained_recovery, bouncer) based on
-    their longitudinal diagnosis sequence.
+    Classify subjects who showed a backward diagnosis transition (e.g., MCI → CN)
+    into four trajectory groups based on their full longitudinal diagnosis sequence.
+
+    This function is used to identify and exclude MCI subjects who reverted to
+    cognitively normal status before the primary analysis. Per sponsor guidance,
+    reversions most commonly reflect transient non-biological factors (sleep
+    deprivation, mood, medication) rather than genuine recovery. Including them
+    would introduce noise into event-time labels.
+
+    The four groups are defined by examining the diagnosis sequence after the
+    first observed reversion:
+
+    | Group | Criterion |
+    |-------|-----------|
+    | ``transient_noise`` | Single reversion immediately followed by return to ``from_state`` |
+    | ``sustained_recovery`` | ≥3 trailing ``to_state`` visits at end of follow-up |
+    | ``bouncer`` | Alternating pattern between ``from_state`` and ``to_state`` |
+    | ``progressor`` | Reverted to ``to_state`` but later progressed to Dementia |
+
+    Args:
+        df_all (pd.DataFrame): Full longitudinal DataFrame with columns ``'RID'``,
+            ``'DX'``, ``'DX_bl'``, and ``'Years_bl'``. One row per subject-visit.
+        from_state (str): The starting diagnosis state (e.g., ``'MCI'``). Subjects
+            whose baseline diagnosis matches this value are evaluated.
+            Default ``'MCI'``.
+        to_state (str): The reversion target state (e.g., ``'CN'``). Subjects are
+            classified only if this state appears in their longitudinal sequence
+            after ``from_state``. Default ``'CN'``.
+
+    Returns:
+        dict: Four keys — ``'transient_noise'``, ``'sustained_recovery'``,
+            ``'bouncer'``, ``'progressor'`` — each mapping to a ``set`` of
+            integer ``RID`` values belonging to that group.  Subjects with no
+            observed reversion are not included in any group.
+
+    Notes:
+        - Subjects are evaluated regardless of whether they eventually progress
+          to Dementia; ``'progressor'`` captures the subset that do.
+        - All four groups are typically excluded from the MCI → Dementia cohort
+          in ``build_survival_labels`` via the ``exclusion_rids`` argument.
     """
     mci_rids = df_all[df_all['DX_bl'] == from_state]['RID'].unique()
     groups = {'transient_noise': set(), 'sustained_recovery': set(),
@@ -59,10 +96,49 @@ def classify_reverters(df_all, from_state='MCI', to_state='CN'):
 
 def build_survival_labels(df_all, df_baseline, from_dx, to_dx,
                            exclusion_rids=None):
-    '''
-    Build survival (event, duration, cutoff) labels.
-    exclusion_rids: set of RIDs to skip (reverters, etc.)
-    '''
+    """
+    Build time-to-event survival labels for a single cohort transition
+    (e.g., MCI → Dementia or CN → Decline).
+
+    For each subject in the cohort, the function determines:
+    - Whether the target diagnosis was observed at any post-baseline visit (event)
+    - The time from baseline to first conversion or last visit (duration)
+
+    Subjects with ``duration ≤ 0`` are dropped as degenerate records (e.g., subjects
+    whose only post-baseline visit is at ``Years_bl = 0`` or who were miscoded).
+
+    Args:
+        df_all (pd.DataFrame): Full longitudinal DataFrame with columns ``'RID'``,
+            ``'DX'``, ``'VISCODE'``, and ``'Years_bl'``. One row per subject-visit.
+        df_baseline (pd.DataFrame): Baseline-only DataFrame (``VISCODE == 'bl'``),
+            used to identify subjects whose baseline diagnosis matches ``from_dx``.
+            Must contain ``'RID'`` and ``'DX_bl'`` columns.
+        from_dx (str): Baseline diagnosis state that defines cohort membership
+            (e.g., ``'MCI'`` or ``'CN'``).
+        to_dx (str): Target diagnosis state that constitutes the event
+            (e.g., ``'Dementia'`` or ``'MCI'``).
+        exclusion_rids (set or None): Optional set of integer ``RID`` values to
+            exclude from the cohort (e.g., reverters identified by
+            ``classify_reverters``). If ``None``, no subjects are excluded.
+            Default ``None``.
+
+    Returns:
+        pd.DataFrame: One row per subject, indexed by ``RID``. Columns:
+
+            - ``'event'`` (int): ``1`` if the target diagnosis was observed at a
+              post-baseline visit; ``0`` if the subject was censored.
+            - ``'duration'`` (float): Years from baseline to first conversion
+              (event subjects) or last observed visit (censored subjects).
+            - ``'cutoff'`` (float): Same as ``'duration'``. Stored separately for
+              use in ``compute_slopes_cutoff`` to enforce leakage-free slope
+              computation — slopes are computed only from visits before this boundary.
+
+    Notes:
+        - Only post-baseline visits (``VISCODE != 'bl'``) are checked for the target
+          diagnosis, preventing baseline diagnosis from triggering an immediate event.
+        - The first (earliest) post-baseline visit with ``DX == to_dx`` is used as
+          the event time if multiple such visits exist.
+    """
     if exclusion_rids is None:
         exclusion_rids = set()
     rids = df_baseline[df_baseline['DX_bl'] == from_dx]['RID'].unique()
@@ -86,11 +162,56 @@ def build_survival_labels(df_all, df_baseline, from_dx, to_dx,
 
 def run_combat(df_baseline):
     """
-    Batch variable       : FLDSTRENG (1.5T vs 3T)
-    Protected covariates : DX_bl, AGE, PTGENDER
-    NaN handling         : fill with per-feature median before ComBat,
-                           restore NaN after so we don't fabricate data
-    Writeback            : iloc + integer positions, no index alignment issues
+    Apply ComBat batch effect correction to MRI volumetric features using
+    ``neuroCombat``, removing scanner-induced variance while preserving
+    biological signal.
+
+    MRI volumes in ADNI were acquired on 1.5T scanners (ADNI1/GO) and 3T
+    scanners (ADNI2/3/4). This field-strength difference creates systematic
+    batch effects that can bias survival models if uncorrected. ComBat
+    estimates and removes additive and multiplicative scanner effects via an
+    empirical Bayes shrinkage procedure.
+
+    **Batch variable:** ``FLDSTRENG`` (``'1.5 Tesla MRI'`` → 1, ``'3 Tesla MRI'`` → 2)
+
+    **Protected covariates passed to ComBat:** ``DX_bl``, ``AGE``, ``PTGENDER``  
+    These are held fixed during batch estimation so their biological signal is
+    not absorbed into the correction.
+
+    **NaN handling:** ComBat cannot accept missing values. Per-feature medians
+    are used to temporarily fill NaN cells before running ComBat; the original
+    NaN positions are restored afterward so no data is fabricated.
+
+    **Writeback strategy:** Results are written back with ``iloc`` integer
+    indexing rather than label-based indexing to avoid silent misalignment
+    when ``df_baseline`` has a non-default index.
+
+    Args:
+        df_baseline (pd.DataFrame): Baseline visit DataFrame. Must contain
+            the six columns in ``MRI_HARMONIZE_COLS``
+            (Hippocampus, Entorhinal, Ventricles, Fusiform, MidTemp, WholeBrain),
+            plus ``'FLDSTRENG'``, ``'DX_bl'``, ``'AGE'``, ``'PTGENDER'``,
+            and ``'COLPROT'``.
+
+    Returns:
+        pd.DataFrame: ``df_baseline`` with harmonized MRI values written in-place
+            to the six ``MRI_HARMONIZE_COLS`` columns. Original pre-harmonization
+            values are preserved in ``'<col>_raw'`` columns for validation.
+            Subjects missing ``FLDSTRENG`` or all MRI values are excluded from
+            ComBat and their original values are left unchanged.
+
+    Side effects:
+        - Adds ``'<col>_raw'`` columns for all six MRI features.
+        - Prints a summary of subjects included/excluded and NaN counts.
+        - Prints ComBat output shape and a sample of harmonized values for
+          quick sanity checking.
+
+    Notes:
+        Residual statistical differences across ADNI phases after ComBat are
+        expected and represent real biological differences (ADNI1 enrolled
+        later-stage subjects than ADNI3). The target diagnostic is reduction
+        in the 1.5T vs. 3T gap, not elimination of all cross-phase differences.
+        See ``harmonization_report`` for a quantitative validation.
     """
     has_mri   = df_baseline[MRI_HARMONIZE_COLS[0]].notna()
     has_field = df_baseline['FLDSTRENG'].notna()
@@ -279,14 +400,53 @@ What matters is the 1.5T vs 3T gap reduction -- target 30-70%.
 
 
 def compute_slopes_cutoff(df_all, surv_labels, features, min_visits=2):
-    '''
-    Per-subject OLS slopes strictly from pre-cutoff visits.
-    Returns DataFrame: slope_<feat>, slope_velocity_<feat>
+    """
+    Compute per-subject OLS regression slopes for each clinical feature
+    using only pre-cutoff longitudinal visits, strictly preventing data leakage.
 
-    NOTE: n_visits_used, pre_conversion_span_yr, visit_regularity are computed
-    here for diagnostics ONLY and are NOT returned as model features — they
-    encode event timing and would cause data leakage.
-    '''
+    For each subject, the cutoff time is read from ``surv_labels['cutoff']``:
+    - **Event subjects** (``event == 1``): only visits with ``Years_bl < cutoff``
+      are used — post-conversion visits are excluded entirely.
+    - **Censored subjects** (``event == 0``): visits with ``Years_bl <= cutoff``
+      are used.
+
+    This temporal boundary is critical for clinical validity: slope features must
+    reflect only information that would have been available at the time of prediction.
+    Using post-conversion visits would constitute data leakage and produce
+    artificially optimistic model performance.
+
+    For subjects with ≥4 pre-cutoff visits, a **slope velocity** feature is also
+    computed as the second-half slope minus the first-half slope (split at the
+    median follow-up time within the subject's usable visits). A positive velocity
+    indicates accelerating decline; a negative velocity indicates deceleration.
+
+    Args:
+        df_all (pd.DataFrame): Full longitudinal DataFrame with columns ``'RID'``,
+            ``'Years_bl'``, and one column per feature in ``features``.
+        surv_labels (pd.DataFrame): Survival label DataFrame indexed by ``RID``
+            with columns ``'cutoff'`` (float, years) and ``'event'`` (0 or 1).
+        features (list[str]): Column names in ``df_all`` for which to compute slopes.
+            Typically includes cognitive, MRI, and CSF features.
+        min_visits (int): Minimum number of non-NaN observations required to fit
+            a slope. Subjects with fewer valid observations receive ``NaN`` for
+            that feature's slope. Default ``2``.
+
+    Returns:
+        pd.DataFrame: One row per subject, with columns:
+
+            - ``'RID'`` (int): Subject identifier.
+            - ``'slope_<feat>'`` (float): OLS slope in units per year for each
+              feature in ``features``. ``NaN`` if fewer than ``min_visits``
+              valid observations exist.
+            - ``'slope_velocity_<feat>'`` (float): Second-half minus first-half
+              slope (acceleration of change). ``NaN`` if fewer than 4 usable
+              visits or if either half has fewer than 2 observations.
+
+    Notes:
+        ``n_visits_used``, ``pre_conversion_span_yr``, and ``visit_regularity``
+        are computed internally for diagnostics only and are **not** returned
+        as model features — they encode event timing and would cause data leakage.
+    """
     results = {}
     for rid, row in surv_labels.iterrows():
         cutoff, is_event = row['cutoff'], row['event'] == 1
@@ -471,4 +631,3 @@ def get_domain_features(feature_names):
         combined = list(dict.fromkeys(base + domains[d]))
         domains[d] = [f for f in combined if f in feature_names]
     return domains
-
