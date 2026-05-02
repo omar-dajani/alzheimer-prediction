@@ -891,18 +891,18 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
     net_final = tt.practical.MLPVanilla(
         X_tr_sc.shape[1], hidden_final, 1,
         batch_norm=True, dropout=best['dropout'])
-    final = PycoxCoxPH(net_final, tt.optim.Adam(lr=best['lr'], weight_decay=best['wd']))
+    final = PycoxCoxPH(net_final, tt.optim.Adam(lr=best['lr'] * 0.5, weight_decay=best['wd']))
 
     y_tr_f = (y_duration[idx_tr].astype(np.float32), y_event[idx_tr].astype(np.float32))
     y_va_f = (y_duration[idx_va].astype(np.float32), y_event[idx_va].astype(np.float32))
 
     log = final.fit(
-        X_tr_sc, y_tr_f, best['batch'], 200,
-        val_data=(X_va_sc, y_va_f),
-        callbacks=[tt.callbacks.EarlyStopping(patience=15)],
-        verbose=False,
+    X_tr_sc, y_tr_f, best['batch'], 200,
+    val_data=(X_va_sc, y_va_f),
+    callbacks=[tt.callbacks.EarlyStopping(patience=15)],
+    verbose=False,
     )
-
+    
     loss_history = {'train': [], 'val': []}
     try:
         log_df = log.to_pandas() if hasattr(log, 'to_pandas') else log
@@ -913,7 +913,26 @@ def run_deepsurv(X_imp, y_event, y_duration, label,
                 loss_history['val'] = log_df['val_loss'].dropna().tolist()
     except Exception:
         pass
-
+    
+    # Validate the fit actually converged before computing hazards
+    _surv_check = final.predict_surv_df(X_tr_sc[:10])
+    _ev_check = EvalSurv(_surv_check,
+                         y_duration[idx_tr[:10]].astype(np.float64),
+                         y_event[idx_tr[:10]].astype(bool))
+    _c_check = _ev_check.concordance_td()
+    if _c_check < 0.55:
+        # Final refit diverged — rebuild with lower lr and verbose to surface errors
+        print(f'  WARNING: final refit C={_c_check:.4f} — diverged, rebuilding with lr*0.3')
+        net_final = tt.practical.MLPVanilla(
+            X_tr_sc.shape[1], hidden_final, 1,
+            batch_norm=True, dropout=best['dropout'])
+        final = PycoxCoxPH(net_final, tt.optim.Adam(
+            lr=best['lr'] * 0.3, weight_decay=best['wd']))
+        final.fit(X_tr_sc, y_tr_f, best['batch'], 200,
+                  val_data=(X_va_sc, y_va_f),
+                  callbacks=[tt.callbacks.EarlyStopping(patience=15)],
+                  verbose=False)
+    
     final.compute_baseline_hazards(
         input=X_tr_sc,
         target=(
