@@ -32,19 +32,19 @@ All metrics are IPCW Antolini time-dependent C-td on a held-out 20% test set wit
 alzheimer-prediction/
 │
 ├── Data/
-│   ├── Download_Data/                 # Scripts to download preprocessed datasets (authorized users only)
-│   │   ├── download_tabular_dataset.py
-│   │   ├── download_imaging_dataset.py
-│   │   └── download_entire_master_dataset.py
+│   ├── Download_Data/                 # Download preprocessed datasets (authorized users)
+│   │   ├── download_tabular_dataset.py        # Download merged tabular data
+│   │   ├── download_imaging_dataset.py        # Download MRI + flow tensors
+│   │   └── download_entire_master_dataset.py  # Download all datasets
 │   │
-│   └── Data Preprocessing Pipeline/   # Full raw ADNI → modeling-ready pipeline (AWS)
-│       ├── 01_mri_prep_improved_v2_aws.py
-│       ├── 02_tabular_prep_improved_v2_aws.py
-│       ├── phase2_dicom_to_nifti_aws.py
-│       ├── phase3_3_generate_flows.py
-│       ├── aws_download_from_s3.sh
-│       ├── aws_setup.sh
-│       └── run_pipeline_aws.sh
+│   └── Data Preprocessing Pipeline/   # Raw ADNI → modeling-ready pipeline
+│       ├── 01_mri_prep_improved_v2_aws.py     # NIfTI → MRI tensors
+│       ├── 02_tabular_prep_improved_v2_aws.py # Merge + build master table
+│       ├── phase2_dicom_to_nifti_aws.py       # DICOM → NIfTI conversion
+│       ├── phase3_3_generate_flows.py         # Generate longitudinal flows
+│       ├── aws_download_from_s3.sh            # Download raw data from S3
+│       ├── aws_setup.sh                      # Setup AWS environment
+│       └── run_pipeline_aws.sh               # Run full pipeline
 │
 ├── EDA/
 │   ├── Multimodal vs Single Modality/        # Integrated multimodal dataset + coverage analysis
