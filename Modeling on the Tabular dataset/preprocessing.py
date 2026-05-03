@@ -74,7 +74,7 @@ def classify_reverters(df_all, from_state='MCI', to_state='CN'):
         if first_idx is None:
             continue
         after = seq[first_idx:]
-        if 'Dementia' in seq:
+        if 'AD' in seq:
             groups['progressor'].add(rid)
         elif len(after) >= 2 and after[0] == to_state and from_state in after[1:]:
             groups['transient_noise'].add(rid)
