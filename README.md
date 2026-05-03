@@ -54,16 +54,16 @@ alzheimer-prediction/
 │   └── README.md                            # Overview of all EDA analyses
 │
 ├── Modeling on the Imaging Dataset/   # Transformer-based survival model on MRI
-│   ├── Config/
-│   ├── Data/
-│   ├── Losses/
-│   ├── Metrics/
-│   ├── Models/
-│   ├── Training/
-│   ├── Utils/
-│   ├── WORKFLOW.md
-│   ├── run_all_pipeline.ipynb
-│   └── train.py
+│   ├── Config/        # Centralized model hyperparameters
+│   ├── Datasets/          # Dataset + normalization logic
+│   ├── Losses/        # Survival loss functions (IPCW)
+│   ├── Metrics/       # Evaluation metrics (C_td, Uno C, etc.)
+│   ├── Models/        # Core model architecture components
+│   ├── Training/      # Training loop + optimization logic
+│   ├── Utils/         # Supporting utilities (encoding, interpolation)
+│   ├── WORKFLOW.md    # End-to-end pipeline explanation
+│   ├── run_all_pipeline.ipynb  # Notebook runner for full pipeline
+│   └── train.py       # CLI entry point for training
 │
 ├── Modeling on the Tabular dataset/   # Main tabular survival pipeline (this README)
 │   ├── Tabular_Survival_Analysis_Pipeline.ipynb   # Main notebook
