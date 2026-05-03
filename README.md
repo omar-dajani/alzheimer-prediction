@@ -32,7 +32,12 @@ All metrics are IPCW Antolini time-dependent C-td on a held-out 20% test set wit
 alzheimer-prediction/
 │
 ├── Data/
-│   └── Data Preprocessing Pipeline/   # Scripts to build the merged ADNI CSV
+│   ├── Download_Data/                 # Scripts to download preprocessed datasets (authorized users only)
+│   │   ├── download_tabular_dataset.py
+│   │   ├── download_imaging_dataset.py
+│   │   └── download_entire_master_dataset.py
+│   │
+│   └── Data Preprocessing Pipeline/   # Full raw ADNI → modeling-ready pipeline (AWS)
 │       ├── 01_mri_prep_improved_v2_aws.py
 │       ├── 02_tabular_prep_improved_v2_aws.py
 │       ├── phase2_dicom_to_nifti_aws.py
@@ -127,34 +132,40 @@ EDA/README.md
 
 ## Data
 
-> **⚠️ ADNI data is not included in this repository.** Access requires an approved application under the ADNI Data Use Agreement. Do not commit data files to this repo — they are excluded via `.gitignore`.
+> **This repository is currently private and contains ADNI-derived data access utilities.**  
+Access is restricted to authorized users (team members and instructor) under the ADNI Data Use Agreement.
 
-### Applying for access
+> **ADNI data is not included in this repository.**  
+Access requires an approved application under the ADNI Data Use Agreement. Do not commit data files to this repo — they are excluded via `.gitignore`.
 
-Apply at [adni.loni.usc.edu](https://adni.loni.usc.edu). Approval typically takes 1–2 weeks.
+---
 
-### What data this pipeline uses
+## Data Access Options
 
-The pipeline uses a single merged CSV built from the ADNIMERGE R package, which aggregates data from all ADNI study phases (ADNI1, ADNI GO, ADNI2, ADNI3, ADNI4). The following tables were exported from R and merged on `RID` (participant ID) and `VISCODE` (standardized visit code):
+This project supports two workflows depending on your use case.
 
-| Table | Contents |
-|-------|----------|
-| `adrs.csv` | ADAS-Cog cognitive assessment scores |
-| `biomarkers.csv` | CSF (Amyloid-β, Tau, Phospho-Tau) and PET (FDG, AV45) measurements |
-| `subjects.csv` | Demographics, diagnosis labels, APOE genotype |
-| `UCSFFSX7.csv` | Structural MRI volumes from FreeSurfer segmentation |
+---
 
-The merged dataset covers **2,430 baseline subjects** across CN, MCI, and AD diagnoses with longitudinal follow-up of up to 10+ years.
+### Option 1 — Quick Start (Preprocessed Data)
 
-### Building the merged CSV
+The `Data/Download_Data/` directory provides scripts to download preprocessed datasets for rapid experimentation and reproducibility.
 
-The `Data/Data Preprocessing Pipeline/` directory contains scripts to download and preprocess the raw ADNI data. See the scripts there for the full preprocessing workflow. Once you have the merged CSV, place it at:
+#### Scripts
 
-```
-Modeling on the Tabular dataset/tables/your_merged_adni.csv
-```
+- `download_tabular_dataset.py`  
+  Downloads the merged ADNI tabular dataset (clinical + biomarkers + MRI references)
 
-Then update `DATA_PATH` in the path configuration cell of the notebook (Section 1.2).
+- `download_imaging_dataset.py`  
+  Downloads MRI tensors and longitudinal flow tensors
+
+- `download_entire_master_dataset.py`  
+  Downloads all datasets
+
+#### Usage
+
+```bash
+cd Data/Download_Data
+python download_entire_master_dataset.py
 
 ---
 
