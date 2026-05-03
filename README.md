@@ -85,51 +85,6 @@ alzheimer-prediction/
 
 ---
 
-## Exploratory Data Analysis (EDA)
-
-The `EDA/` directory contains a set of complementary analyses designed to build a complete understanding of the ADNI dataset before modeling.
-
-Each EDA focuses on a different dimension of the data:
-
-### Multimodal vs Single Modality
-- Integrates genetics, plasma biomarkers, cognition, and MRI-derived features
-- Analyzes overlap between modalities and cohort construction
-- Highlights limitations of multimodal modeling due to sparse MRI coverage
-
-### Feature Deep Dive
-- Examines distributions and correlations of key clinical features
-- Compares CN, MCI, and AD populations
-- Validates biological signals (e.g., APOE, amyloid, tau)
-
-### MRI Longitudinal Dynamics
-- Studies MRI scan frequency, follow-up duration, and dropout behavior
-- Identifies retention bias (progressing patients are tracked longer)
-- Quantifies imaging vs tabular data availability gaps
-
-### Statistical and Patient Trajectories
-- Performs ANOVA-based feature significance testing
-- Visualizes feature distributions across diagnosis groups
-- Tracks individual patient trajectories over time
-
-### Why this matters
-
-These analyses collectively:
-
-- Define the **true usable cohort**
-- Identify **high-signal features**
-- Reveal **longitudinal and modality biases**
-- Inform **model design and feature engineering decisions**
-
-The EDA work directly supports the survival modeling pipeline by ensuring that assumptions about the data are validated before training.
-
-For full details, see:
-
-```
-EDA/README.md
-```
-
----
-
 ## Data
 
 > **This repository is currently private and contains ADNI-derived data access utilities.**  
@@ -216,11 +171,56 @@ conda activate neuron
 
 ---
 
-## Running the Pipeline
+## Exploratory Data Analysis (EDA)
+
+The `EDA/` directory contains a set of complementary analyses designed to build a complete understanding of the ADNI dataset before modeling.
+
+Each EDA focuses on a different dimension of the data:
+
+### Multimodal vs Single Modality
+- Integrates genetics, plasma biomarkers, cognition, and MRI-derived features
+- Analyzes overlap between modalities and cohort construction
+- Highlights limitations of multimodal modeling due to sparse MRI coverage
+
+### Feature Deep Dive
+- Examines distributions and correlations of key clinical features
+- Compares CN, MCI, and AD populations
+- Validates biological signals (e.g., APOE, amyloid, tau)
+
+### MRI Longitudinal Dynamics
+- Studies MRI scan frequency, follow-up duration, and dropout behavior
+- Identifies retention bias (progressing patients are tracked longer)
+- Quantifies imaging vs tabular data availability gaps
+
+### Statistical and Patient Trajectories
+- Performs ANOVA-based feature significance testing
+- Visualizes feature distributions across diagnosis groups
+- Tracks individual patient trajectories over time
+
+### Why this matters
+
+These analyses collectively:
+
+- Define the **true usable cohort**
+- Identify **high-signal features**
+- Reveal **longitudinal and modality biases**
+- Inform **model design and feature engineering decisions**
+
+The EDA work directly supports the survival modeling pipeline by ensuring that assumptions about the data are validated before training.
+
+For full details, see:
+
+```
+EDA/README.md
+```
+
+---
+
+## Running the Tabular Pipeline
 
 ### 1. Configure paths
 
-In the notebook, find the path configuration cell (Section 1.2) and set:
+In the Tabular_Survival_Analysis_Pipeline notebook, find the path configuration cell (Section 1.2) and set:
 
 ```python
 REPO_DIR  = Path('/path/to/alzheimer-prediction')
