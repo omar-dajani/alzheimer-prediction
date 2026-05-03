@@ -5,7 +5,9 @@
 A survival analysis pipeline for predicting Alzheimer's disease progression using longitudinal data from the Alzheimer's Disease Neuroimaging Initiative (ADNI). The pipeline predicts two clinical transitions — **MCI → Alzheimer's Dementia** and **CN → MCI or AD** — using four model families with full hyperparameter optimization, bootstrap confidence intervals, and cross-cohort evaluation.
 
 **Team:** Nathon Chavez, Omar Dajani, Eliza Iqbal, Savannah Nix, Fabrizio Pacheco, Evie Roth, Shichen Tang  
-**Sponsor:** Antonio Mendoza Gonzales
+**Sponsor:** Cindy Zhang
+**Instructor:** Xinjie Lan
+**Mentor:** Antonio Mendoza Gonzales
 
 ---
 
